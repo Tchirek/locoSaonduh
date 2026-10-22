@@ -68,6 +68,7 @@ pub fn run() {
             commands::set_output,
             commands::refresh_audio,
             commands::probe_network,
+            commands::probe_address,
         ])
         .build(tauri::generate_context!())
         .expect("error while building locoSaonduh");

@@ -102,3 +102,11 @@ pub async fn probe_network(state: State<'_, AppState>) -> Result<(), String> {
         .await
         .map_err(|error| error.to_string())?
 }
+
+#[tauri::command]
+pub async fn probe_address(state: State<'_, AppState>, address: String) -> Result<(), String> {
+    let service = state.service()?;
+    tauri::async_runtime::spawn_blocking(move || service.probe_address(address))
+        .await
+        .map_err(|error| error.to_string())?
+}

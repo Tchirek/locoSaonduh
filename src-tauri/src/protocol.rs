@@ -173,11 +173,20 @@ pub fn parse_end_session(buf: &[u8]) -> Result<u32, ProtocolError> {
 #[serde(tag = "type", content = "data", rename_all = "camelCase")]
 pub enum Control {
     Announce(Announce),
-    Probe { id: String },
+    Probe {
+        id: String,
+        #[serde(default)]
+        announce: Option<Announce>,
+    },
     Subscribe(Subscribe),
     Subscribed(Subscribed),
-    Unsubscribe { session: u32 },
-    Ended { session: u32, reason: String },
+    Unsubscribe {
+        session: u32,
+    },
+    Ended {
+        session: u32,
+        reason: String,
+    },
     Feedback(Feedback),
 }
 
@@ -343,11 +352,19 @@ mod tests {
     fn control_messages_are_compact_and_typed() {
         let control = Control::Probe {
             id: "device-a".to_owned(),
+            announce: None,
         };
         let json = serde_json::to_string(&control).unwrap();
         assert!(json.contains("\"type\":\"probe\""));
         let decoded: Control = serde_json::from_str(&json).unwrap();
         assert!(matches!(decoded, Control::Probe { .. }));
+    }
+
+    #[test]
+    fn an_old_probe_without_announce_still_parses() {
+        let probe: Control =
+            serde_json::from_str(r#"{"type":"probe","data":{"id":"old"}}"#).unwrap();
+        assert!(matches!(probe, Control::Probe { announce: None, .. }));
     }
 
     #[test]

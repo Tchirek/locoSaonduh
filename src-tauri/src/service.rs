@@ -6,7 +6,7 @@
 //! from ever blocking the speaker.
 
 use std::collections::HashMap;
-use std::net::{SocketAddr, UdpSocket};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -21,7 +21,9 @@ use crate::audio::{
     AudioSource, Decoder, Encoder, OpenCapture, OutputDevice, PlaybackSink, SourceKind,
     list_output_devices, list_sources, open_capture,
 };
-use crate::net::{LocalNetwork, bind_discovery_socket, local_network, send_discovery};
+use crate::net::{
+    LocalNetwork, bind_discovery_socket, local_network, scan_discovery, send_discovery,
+};
 use crate::protocol::{
     Announce, BroadcastAnnounce, CHANNELS, CodecAnnounce, Control, FRAME_SAMPLES, Feedback,
     MAX_CONTROL_BYTES, Peer, Subscribe, Subscribed, build_audio_packet, is_audio_datagram,
@@ -36,7 +38,8 @@ use crate::state::{
 const ANNOUNCE_EVERY: Duration = Duration::from_secs(2);
 const FEEDBACK_EVERY: Duration = Duration::from_millis(500);
 const SNAPSHOT_EVERY: Duration = Duration::from_millis(180);
-const PEER_TTL: Duration = Duration::from_secs(7);
+const PEER_TTL: Duration = Duration::from_secs(25);
+const SCAN_EVERY: Duration = Duration::from_secs(12);
 const PENDING_TTL: Duration = Duration::from_millis(2_500);
 const LISTENER_TTL: Duration = Duration::from_secs(30);
 const MAX_LISTENERS: usize = 24;
@@ -85,6 +88,10 @@ enum Command {
         reply: Reply,
     },
     Probe {
+        reply: Reply,
+    },
+    ProbeAddress {
+        address: String,
         reply: Reply,
     },
     Shutdown,
@@ -155,7 +162,7 @@ impl Service {
                 ip: local.ip.clone(),
                 interface: local.interface.clone(),
                 port,
-                discovery: "UDP 组播 + 广播".to_owned(),
+                discovery: "UDP 组播 + 定向广播 + 子网扫描".to_owned(),
             },
             sources: sources.clone(),
             outputs: outputs.clone(),
@@ -189,6 +196,7 @@ impl Service {
             next_feedback: Instant::now() + FEEDBACK_EVERY,
             next_snapshot: Instant::now() + SNAPSHOT_EVERY,
             next_network_refresh: Instant::now() + Duration::from_secs(5),
+            next_scan: Instant::now(),
             command_rx,
         };
         thread::Builder::new()
@@ -275,7 +283,17 @@ impl Service {
     }
 
     pub fn probe(&self) -> Result<(), String> {
-        self.call(|reply| Command::Probe { reply }, Duration::from_secs(1))
+        self.call(|reply| Command::Probe { reply }, Duration::from_secs(3))
+    }
+
+    pub fn probe_address(&self, address: impl Into<String>) -> Result<(), String> {
+        self.call(
+            |reply| Command::ProbeAddress {
+                address: address.into(),
+                reply,
+            },
+            Duration::from_secs(2),
+        )
     }
 
     pub fn shutdown(&self) {
@@ -316,6 +334,7 @@ struct Coordinator {
     next_feedback: Instant,
     next_snapshot: Instant,
     next_network_refresh: Instant,
+    next_scan: Instant,
     command_rx: Receiver<Command>,
 }
 
@@ -431,6 +450,9 @@ impl Coordinator {
                 self.local = local_network();
                 self.next_network_refresh = now + Duration::from_secs(5);
             }
+            if now >= self.next_scan {
+                self.scan_network();
+            }
             self.expire_pending(now);
             self.prune_peers(now);
             self.reap_stale_listeners(now);
@@ -541,8 +563,15 @@ impl Coordinator {
             }
             Command::Probe { reply } => {
                 self.probe_network();
-                self.announce();
                 let _ = reply.send(Ok(()));
+            }
+            Command::ProbeAddress { address, reply } => {
+                let result = self.probe_address(&address);
+                if let Err(message) = &result {
+                    self.set_notice("error", message.clone());
+                    self.publish();
+                }
+                let _ = reply.send(result);
             }
             Command::Shutdown => return false,
         }
@@ -894,11 +923,25 @@ impl Coordinator {
                 self.peers.insert(announce.id.clone(), peer);
                 self.publish_soon();
             }
-            Control::Probe { id } => {
+            Control::Probe { id, announce } => {
                 if id == self.settings.id {
                     return;
                 }
-                self.send_announce_to(SocketAddr::new(from.ip(), from.port()));
+                let response_port = announce
+                    .as_ref()
+                    .map(|announce| announce.port)
+                    .unwrap_or_else(|| from.port());
+                if let Some(announce) = announce
+                    && announce.is_compatible()
+                    && announce.id != self.settings.id
+                {
+                    let address = SocketAddr::new(from.ip(), announce.port);
+                    let peer_id = announce.id.clone();
+                    self.peers
+                        .insert(peer_id, Peer::from_announce(&announce, address));
+                    self.publish_soon();
+                }
+                self.send_announce_to(SocketAddr::new(from.ip(), response_port));
             }
             Control::Subscribe(subscribe) => self.accept_subscriber(subscribe, from),
             Control::Subscribed(subscribed) => self.handle_subscribed(subscribed, from),
@@ -1062,29 +1105,75 @@ impl Coordinator {
     }
 
     fn probe_network(&mut self) {
-        let probe = Control::Probe {
-            id: self.settings.id.clone(),
-        };
-        self.broadcast_control(&probe);
+        let probe = self.build_probe();
+        if let Ok(json) = serde_json::to_vec(&probe) {
+            let sent = send_discovery(&json, self.port);
+            log::debug!("discovery probe sent on {sent} interface targets");
+        }
+        self.scan_network();
         self.announce();
+        self.next_announce = Instant::now() + ANNOUNCE_EVERY;
+    }
+
+    fn scan_network(&mut self) {
+        let probe = self.build_probe();
+        if let Ok(json) = serde_json::to_vec(&probe) {
+            let sent = scan_discovery(&self.socket, &json, self.port);
+            log::debug!("subnet discovery probe sent to {sent} hosts");
+        }
+        self.next_scan = Instant::now() + SCAN_EVERY;
+    }
+
+    fn probe_address(&mut self, address: &str) -> Result<(), String> {
+        let address = address.trim();
+        if address.is_empty() {
+            return Err("请输入对方的局域网 IP".to_owned());
+        }
+        let target = match address.parse::<SocketAddr>() {
+            Ok(target) => target,
+            Err(_) => format!("{address}:{}", self.port)
+                .parse::<SocketAddr>()
+                .map_err(|_| "IP 地址格式不正确".to_owned())?,
+        };
+        if !target.ip().is_ipv4() {
+            return Err("目前只支持 IPv4 地址".to_owned());
+        }
+        if target.ip() == IpAddr::V4(Ipv4Addr::UNSPECIFIED) || target.ip().is_loopback() {
+            return Err("请输入同一局域网内另一台设备的地址".to_owned());
+        }
+        let probe = self.build_probe();
+        self.send_control(target, &probe);
+        self.set_notice("info", format!("已向 {target} 发送发现请求"));
+        self.publish_soon();
+        Ok(())
+    }
+
+    fn build_probe(&self) -> Control {
+        Control::Probe {
+            id: self.settings.id.clone(),
+            announce: Some(self.build_announce()),
+        }
     }
 
     fn announce(&mut self) {
         let announce = self.build_announce();
-        if let Ok(json) = serde_json::to_vec(&Control::Announce(announce)) {
-            send_discovery(&self.socket, &json, self.port);
+        let control = Control::Announce(announce);
+        if let Ok(json) = serde_json::to_vec(&control) {
+            send_discovery(&json, self.port);
+        }
+        let addresses = self
+            .peers
+            .values()
+            .map(|peer| SocketAddr::new(peer.address.ip(), peer.port))
+            .collect::<Vec<_>>();
+        for address in addresses {
+            self.send_control(address, &control);
         }
     }
 
     fn send_announce_to(&self, address: SocketAddr) {
         let announce = self.build_announce();
         self.send_control(address, &Control::Announce(announce));
-    }
-
-    fn broadcast_control(&self, control: &Control) {
-        if let Ok(json) = serde_json::to_vec(control) {
-            send_discovery(&self.socket, &json, self.port);
-        }
     }
 
     fn build_announce(&self) -> Announce {
@@ -1426,7 +1515,7 @@ impl Coordinator {
                 ip: self.local.ip.clone(),
                 interface: self.local.interface.clone(),
                 port: self.port,
-                discovery: "UDP 组播 + 广播".to_owned(),
+                discovery: "UDP 组播 + 定向广播 + 子网扫描".to_owned(),
             },
             peers,
             broadcast,

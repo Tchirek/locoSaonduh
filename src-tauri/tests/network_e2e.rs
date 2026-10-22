@@ -1,7 +1,7 @@
 //! Manual end-to-end checks for the two halves of the LAN protocol.
 //!
-//! These need a real audio endpoint and the default UDP port, so they are
-//! ignored by default. Run them one at a time:
+//! These need a real audio endpoint or LAN access, so they are ignored by
+//! default. Run them one at a time:
 //!
 //!   cargo test --test network_e2e -- --ignored --test-threads=1
 //!
@@ -223,6 +223,52 @@ fn a_subscribed_receiver_decodes_audio() {
     );
     service.unsubscribe("e2e-sender").unwrap();
     fake.join().unwrap();
+    service.shutdown();
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+#[ignore = "requires UDP port 53984 and a local network"]
+fn a_unicast_probe_teaches_both_sides() {
+    let dir = temp_dir("probe");
+    let _ = std::fs::remove_dir_all(&dir);
+    let port = 53984u16;
+    let service = Service::start(dir.clone(), port).expect("service should start");
+    wait_for(&service, |snapshot| snapshot.identity.id.len() > 8);
+
+    let fake = UdpSocket::bind("127.0.0.1:0").unwrap();
+    fake.set_read_timeout(Some(Duration::from_millis(250)))
+        .unwrap();
+    let fake_port = fake.local_addr().unwrap().port();
+    let mut announce = Announce::new("probe-peer", "Probe peer", "linux", None);
+    announce.port = fake_port;
+    let probe = Control::Probe {
+        id: "probe-peer".to_owned(),
+        announce: Some(announce),
+    };
+    fake.send_to(&serde_json::to_vec(&probe).unwrap(), ("127.0.0.1", port))
+        .unwrap();
+
+    wait_for(&service, |snapshot| {
+        snapshot.peers.iter().any(|peer| peer.id == "probe-peer")
+    });
+
+    let mut response = None;
+    let deadline = Instant::now() + Duration::from_secs(4);
+    while Instant::now() < deadline {
+        let mut buffer = [0u8; 2_048];
+        let Ok((len, _)) = fake.recv_from(&mut buffer) else {
+            continue;
+        };
+        if let Ok(Control::Announce(announce)) = serde_json::from_slice::<Control>(&buffer[..len]) {
+            response = Some(announce);
+            break;
+        }
+    }
+    let response = response.expect("the probe should receive an announcement");
+    assert!(response.is_compatible());
+    assert_eq!(response.port, port);
+
     service.shutdown();
     let _ = std::fs::remove_dir_all(dir);
 }
