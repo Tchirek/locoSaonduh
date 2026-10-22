@@ -177,7 +177,7 @@ fn a_subscribed_receiver_decodes_audio() {
         let mut encoded = Vec::new();
         for packet_index in 0..8u32 {
             let mut pcm = vec![0.0f32; FRAME_SAMPLES * CHANNELS];
-            for (index, frame) in pcm.chunks_exact_mut(CHANNELS).enumerate() {
+            for (index, frame) in pcm.as_chunks_mut::<CHANNELS>().0.iter_mut().enumerate() {
                 let phase = ((index + packet_index as usize * FRAME_SAMPLES) as f32
                     * 440.0
                     * std::f32::consts::TAU

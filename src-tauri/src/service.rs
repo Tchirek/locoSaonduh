@@ -1593,7 +1593,7 @@ fn mixer_loop(
                 *sample *= gain;
             }
         }
-        for frame in mixed.chunks_exact(CHANNELS) {
+        for frame in mixed.as_chunks::<CHANNELS>().0 {
             let left = frame[0].clamp(-0.98, 0.98);
             let right = frame[1].clamp(-0.98, 0.98);
             if feed.push([left, right]).is_err() {

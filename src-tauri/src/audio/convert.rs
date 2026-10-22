@@ -147,7 +147,7 @@ impl PlaybackAdapter {
 }
 
 pub fn downmix_to_mono(stereo: &[f32], mono: &mut [f32]) {
-    for (frame, slot) in stereo.chunks_exact(CHANNELS).zip(mono.iter_mut()) {
+    for (frame, slot) in stereo.as_chunks::<CHANNELS>().0.iter().zip(mono.iter_mut()) {
         *slot = (frame[0] + frame[1]) * 0.5;
     }
 }
