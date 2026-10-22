@@ -62,6 +62,8 @@ pub struct AudioPacket<'a> {
     pub seq: u32,
     /// Frame index since the start of the broadcast, at 48 kHz.
     pub timestamp: u32,
+    /// Current adaptive Opus rate, so the listener can show what it hears.
+    pub bitrate_kbps: u16,
     pub current: &'a [u8],
     pub previous: &'a [u8],
 }
@@ -70,6 +72,7 @@ pub fn build_audio_packet(
     session: u32,
     seq: u32,
     timestamp: u32,
+    bitrate_kbps: u16,
     current: &[u8],
     previous: &[u8],
 ) -> Vec<u8> {
@@ -84,7 +87,8 @@ pub fn build_audio_packet(
     out.extend_from_slice(&timestamp.to_be_bytes());
     out.extend_from_slice(&(current.len() as u16).to_be_bytes());
     out.extend_from_slice(&(previous.len() as u16).to_be_bytes());
-    out.extend_from_slice(&0u32.to_be_bytes()); // reserved
+    out.extend_from_slice(&bitrate_kbps.to_be_bytes());
+    out.extend_from_slice(&0u16.to_be_bytes()); // reserved
     out.extend_from_slice(current);
     out.extend_from_slice(previous);
     out
@@ -133,6 +137,7 @@ pub fn parse_audio_packet(buf: &[u8]) -> Result<AudioPacket<'_>, ProtocolError> 
     let timestamp = u32::from_be_bytes(buf[16..20].try_into().unwrap());
     let current_len = u16::from_be_bytes(buf[20..22].try_into().unwrap()) as usize;
     let previous_len = u16::from_be_bytes(buf[22..24].try_into().unwrap()) as usize;
+    let bitrate_kbps = u16::from_be_bytes(buf[24..26].try_into().unwrap());
     let total = header_len
         .checked_add(current_len)
         .and_then(|n| n.checked_add(previous_len))
@@ -145,6 +150,7 @@ pub fn parse_audio_packet(buf: &[u8]) -> Result<AudioPacket<'_>, ProtocolError> 
         session,
         seq,
         timestamp,
+        bitrate_kbps,
         current: &buf[header_len..header_len + current_len],
         previous: &buf[header_len + current_len..total],
     })
@@ -220,6 +226,7 @@ impl Announce {
 pub struct BroadcastAnnounce {
     pub session: u32,
     pub source: String,
+    pub source_kind: String,
     pub started_at_ms: u64,
     pub listeners: u32,
     pub codec: CodecAnnounce,
@@ -260,6 +267,7 @@ pub struct Subscribed {
     pub source_id: String,
     pub source_alias: String,
     pub source: String,
+    pub source_kind: String,
     pub sample_rate: u32,
     pub channels: u16,
     pub frame_ms: u16,
@@ -314,18 +322,19 @@ mod tests {
     fn audio_round_trip_keeps_both_frames() {
         let current = [7u8; 91];
         let previous = [3u8; 88];
-        let buf = build_audio_packet(42, 17, 34_560, &current, &previous);
+        let buf = build_audio_packet(42, 17, 34_560, 128, &current, &previous);
         let packet = parse_audio_packet(&buf).unwrap();
         assert_eq!(packet.session, 42);
         assert_eq!(packet.seq, 17);
         assert_eq!(packet.timestamp, 34_560);
+        assert_eq!(packet.bitrate_kbps, 128);
         assert_eq!(packet.current, current);
         assert_eq!(packet.previous, previous);
     }
 
     #[test]
     fn malformed_lengths_are_rejected() {
-        let mut buf = build_audio_packet(1, 2, 3, &[1, 2, 3], &[]);
+        let mut buf = build_audio_packet(1, 2, 3, 96, &[1, 2, 3], &[]);
         buf[20..22].copy_from_slice(&999u16.to_be_bytes());
         assert_eq!(parse_audio_packet(&buf), Err(ProtocolError::Truncated));
     }

@@ -99,6 +99,36 @@ impl PlaybackAdapter {
         }
     }
 
+    /// Produce one stereo frame by pulling at most one 48 kHz frame from the
+    /// source. This is the allocation-free form the output callback uses.
+    pub fn next<F>(&mut self, mut source: F) -> [f32; 2]
+    where
+        F: FnMut() -> [f32; 2],
+    {
+        if (self.step - 1.0).abs() < f64::EPSILON {
+            return source();
+        }
+        while self.phase >= 1.0 {
+            self.previous = Some(self.current);
+            self.current = source();
+            self.phase -= 1.0;
+        }
+        let (a, b) = match self.previous {
+            Some(previous) => (previous, self.current),
+            None => {
+                self.previous = Some(self.current);
+                (self.current, self.current)
+            }
+        };
+        let fraction = self.phase as f32;
+        let frame = [
+            a[0] + (b[0] - a[0]) * fraction,
+            a[1] + (b[1] - a[1]) * fraction,
+        ];
+        self.phase += self.step;
+        frame
+    }
+
     /// Produce exactly `frames` stereo frames by pulling from `source`.
     /// Missing source samples are silence, which is what a starved jitter
     /// buffer should sound like: a clean gap, not a stuck sample.
@@ -106,32 +136,8 @@ impl PlaybackAdapter {
     where
         F: FnMut() -> [f32; 2],
     {
-        if (self.step - 1.0).abs() < f64::EPSILON {
-            for frame in out.iter_mut().take(frames) {
-                *frame = source();
-            }
-            return;
-        }
-
         for frame in out.iter_mut().take(frames) {
-            while self.phase >= 1.0 {
-                self.previous = Some(self.current);
-                self.current = source();
-                self.phase -= 1.0;
-            }
-            let (a, b) = match self.previous {
-                Some(previous) => (previous, self.current),
-                None => {
-                    self.previous = Some(self.current);
-                    (self.current, self.current)
-                }
-            };
-            let fraction = self.phase as f32;
-            *frame = [
-                a[0] + (b[0] - a[0]) * fraction,
-                a[1] + (b[1] - a[1]) * fraction,
-            ];
-            self.phase += self.step;
+            *frame = self.next(&mut source);
         }
     }
 

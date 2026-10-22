@@ -322,6 +322,7 @@ impl StreamBuffer {
             target_ms: self.target_ms(),
             jitter_ms: self.jitter_ms,
             paused: self.paused,
+            started: self.started,
         }
     }
 }
@@ -336,6 +337,7 @@ pub struct StreamCounters {
     pub target_ms: u32,
     pub jitter_ms: f64,
     pub paused: bool,
+    pub started: bool,
 }
 
 impl StreamCounters {
