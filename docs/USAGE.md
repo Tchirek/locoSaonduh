@@ -22,11 +22,28 @@ npm run tauri dev
 
 ## 发布构建
 
+本地构建：
+
 ```sh
 npm run tauri build
 ```
 
 产物在 `src-tauri/target/release/bundle/`。音频热路径不依赖调试构建，正式使用建议用 release。
+
+## GitHub 自动打包
+
+推送任意 `v*` 标签，或在 Actions 里手动运行 `release` 工作流，会并行生成：
+
+- Windows x64：NSIS 安装包
+- macOS Universal：Intel 与 Apple Silicon 通用的 DMG
+- Linux x64：AppImage 与 `.deb`
+
+构建完成后自动发布到 GitHub Releases。包未签名，Windows SmartScreen 与 macOS Gatekeeper 可能要求确认；这不影响功能。macOS 还要求系统录制/本地网络权限。
+
+```sh
+git tag v0.1.0
+git push origin v0.1.0
+```
 
 ## 发送
 

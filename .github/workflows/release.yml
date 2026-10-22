@@ -1,0 +1,110 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (for example v0.1.0)"
+        required: true
+        default: "v0.1.0"
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref_type == 'tag' && github.ref_name || inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows x86_64
+            os: windows-latest
+            args: "--bundles nsis"
+          - name: macOS Universal
+            os: macos-latest
+            args: "--target universal-apple-darwin --bundles dmg"
+          - name: Linux x86_64
+            os: ubuntu-22.04
+            args: "--bundles appimage,deb"
+
+    env:
+      RELEASE_TAG: ${{ github.ref_type == 'tag' && github.ref_name || inputs.tag }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Add macOS universal targets
+        if: runner.os == 'macOS'
+        run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+          key: release-${{ matrix.os }}
+
+      - name: Install Linux system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            curl \
+            file \
+            libasound2-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libssl-dev \
+            libwebkit2gtk-4.1-dev \
+            libxdo-dev \
+            patchelf \
+            wget
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build and publish
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ env.RELEASE_TAG }}
+          releaseName: "locoSaonduh ${{ env.RELEASE_TAG }}"
+          releaseBody: |
+            LAN audio without the cloud.
+
+            ## Downloads
+            - **Windows x86_64**: NSIS installer (`.exe`)
+            - **macOS Universal**: disk image (`.dmg`) for Intel and Apple Silicon
+            - **Linux x86_64**: AppImage and Debian package (`.deb`)
+
+            These builds are unsigned. Windows SmartScreen and macOS Gatekeeper
+            may ask you to confirm before opening them.
+
+            System-output loopback capture is fully supported on Windows. On
+            macOS it depends on the CoreAudio version and Screen Recording
+            permission; on Linux, choose a monitor / loopback input for system
+            audio. Receiving is available on all three platforms. See
+            `docs/USAGE.md` for setup and firewall details.
+
+            Audio is sent over UDP port 53410 and is not encrypted. Use this on
+            a trusted local network.
+          releaseDraft: false
+          prerelease: false
+          args: ${{ matrix.args }}

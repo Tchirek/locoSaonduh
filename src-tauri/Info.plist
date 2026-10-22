@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>NSLocalNetworkUsageDescription</key>
+  <string>locoSaonduh finds and streams audio to devices on your local network.</string>
+  <key>NSMicrophoneUsageDescription</key>
+  <string>locoSaonduh can broadcast your microphone as an optional audio source.</string>
+</dict>
+</plist>
