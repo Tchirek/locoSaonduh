@@ -1,3 +1,4 @@
+pub mod adaptive;
 pub mod protocol;
 
 pub fn run() {
