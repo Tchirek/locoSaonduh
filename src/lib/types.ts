@@ -84,7 +84,7 @@ export interface ListeningStream {
   senderAlias: string;
   source: string;
   sourceKind: string;
-  state: "buffering" | "live" | "waiting";
+  state: "buffering" | "live" | "waiting" | "standby";
   bitrateKbps: number;
   bufferMs: number;
   targetMs: number;

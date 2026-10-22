@@ -41,10 +41,28 @@
     snapshot.peers.filter((peer) => !peer.isBroadcasting).length,
   );
   let listening = $derived(snapshot.listening);
+  let activeListening = $derived(
+    listening.filter((stream) => stream.state !== "standby"),
+  );
+  let standbyListening = $derived(
+    listening.filter((stream) => stream.state === "standby"),
+  );
   let localBlock = $derived(Boolean(snapshot.broadcast));
+  let mixTitle = $derived(
+    activeListening.length > 0 ? "正在播放" : "守听中",
+  );
+  let mixCount = $derived.by(() => {
+    if (activeListening.length === 0) {
+      return `${standbyListening.length} 路守听`;
+    }
+    if (standbyListening.length > 0) {
+      return `${activeListening.length} 路混音 · ${standbyListening.length} 路守听`;
+    }
+    return `${activeListening.length} 路混音`;
+  });
   let bufferTargetLabel = $derived.by(() => {
-    if (listening.length === 0) return "";
-    const values = listening.map((stream) => stream.targetMs);
+    if (activeListening.length === 0) return "";
+    const values = activeListening.map((stream) => stream.targetMs);
     const low = Math.min(...values);
     const high = Math.max(...values);
     return low === high ? `${low} ms` : `${low}–${high} ms`;
@@ -69,6 +87,7 @@
   }
 
   function stateLabel(stream: ListeningStream): string {
+    if (stream.state === "standby") return "等待恢复";
     if (stream.state === "buffering") return "建立缓冲";
     if (stream.state === "waiting") return "等待音频";
     return "播放中";
@@ -120,18 +139,31 @@
     <section class="mix" aria-labelledby="mix-title">
       <div class="section-head mix-head">
         <div class="mix-title-line">
-          <span class="live-dot" aria-hidden="true"></span>
-          <h2 id="mix-title">正在播放</h2>
-          <span class="mix-count mono">{listening.length} 路混音</span>
+          <span
+            class="live-dot"
+            class:standby-dot={activeListening.length === 0}
+            aria-hidden="true"
+          ></span>
+          <h2 id="mix-title">{mixTitle}</h2>
+          <span class="mix-count mono">{mixCount}</span>
         </div>
-        <span class="meta">输出预缓冲 20 ms</span>
+        <span class="meta">
+          {activeListening.length > 0
+            ? "输出预缓冲 20 ms"
+            : "输出保持打开，等待广播恢复"}
+        </span>
       </div>
 
       <div class="mix-console">
         <div class="console-head">
           <span>
-            <span class="console-live">实时</span>
-            声音在这里汇合
+            <span
+              class="console-live"
+              class:muted={activeListening.length === 0}
+            >
+              {activeListening.length > 0 ? "实时" : "守听"}
+            </span>
+            {activeListening.length > 0 ? "声音在这里汇合" : "等待广播恢复"}
           </span>
           <span class="console-output">
             {output?.name ?? "默认输出"}
@@ -139,7 +171,7 @@
         </div>
 
         {#each listening as stream (stream.senderId)}
-          <div class="stream">
+          <div class="stream" class:standby={stream.state === "standby"}>
             <DeviceIcon platform={platformFor(stream.senderId)} size={17} />
             <div class="stream-name">
               <span>{stream.senderAlias}</span>
@@ -150,13 +182,21 @@
             </div>
             <div class="stream-stat stream-stat--buffer">
               <span>缓冲</span>
-              <b class="mono">{stream.bufferMs} ms</b>
+              <b class="mono">
+                {stream.state === "standby" ? "—" : `${stream.bufferMs} ms`}
+              </b>
             </div>
             <div class="stream-stat stream-stat--bitrate">
               <span>码率</span>
-              <b class="mono">{stream.bitrateKbps} kbps</b>
+              <b class="mono">
+                {stream.state === "standby" ? "—" : `${stream.bitrateKbps} kbps`}
+              </b>
             </div>
-            <div class="stream-state" class:waiting={stream.state !== "live"}>
+            <div
+              class="stream-state"
+              class:waiting={stream.state !== "live"}
+              class:standby={stream.state === "standby"}
+            >
               <span class="state-dot" aria-hidden="true"></span>
               {stateLabel(stream)}
             </div>
@@ -173,10 +213,25 @@
         {/each}
 
         <div class="console-foot">
-          <span>自动缓冲 {bufferTargetLabel}</span>
-          <span>抖动 {Math.max(...listening.map((item) => item.jitterMs)).toFixed(1)} ms</span>
-          <span>丢包 {Math.max(...listening.map((item) => item.lossPct)).toFixed(2)}%</span>
-          <span class="console-strategy">链路变差时优先保持连续，平稳后慢慢减回延迟</span>
+          {#if activeListening.length > 0}
+            <span>自动缓冲 {bufferTargetLabel}</span>
+            <span>
+              抖动
+              {Math.max(...activeListening.map((item) => item.jitterMs)).toFixed(1)}
+              ms
+            </span>
+            <span>
+              丢包
+              {Math.max(...activeListening.map((item) => item.lossPct)).toFixed(2)}%
+            </span>
+            {#if standbyListening.length > 0}
+              <span>{standbyListening.length} 路继续守听</span>
+            {/if}
+            <span class="console-strategy">链路变差时优先保持连续，平稳后慢慢减回延迟</span>
+          {:else}
+            <span>广播已停止，输出设备保持打开</span>
+            <span class="console-strategy">对方重新开播后会自动重连，无需再次点收听</span>
+          {/if}
         </div>
       </div>
     </section>
@@ -366,6 +421,11 @@
     background: var(--accent);
   }
 
+  .live-dot.standby-dot,
+  .stream-state.standby .state-dot {
+    background: #7d8177;
+  }
+
   .slash {
     color: var(--rule-strong);
   }
@@ -538,6 +598,10 @@
     letter-spacing: 0.04em;
   }
 
+  .console-live.muted {
+    color: #a4a89b;
+  }
+
   .console-output {
     overflow: hidden;
     max-width: 45%;
@@ -633,6 +697,10 @@
 
   .stream-state.waiting .state-dot {
     background: #85897e;
+  }
+
+  .stream.standby .stream-name span {
+    color: #c8c4b8;
   }
 
   .disconnect {

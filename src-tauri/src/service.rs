@@ -5,7 +5,7 @@
 //! small packets and UI snapshots. That separation is what keeps a busy LAN
 //! from ever blocking the speaker.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -40,6 +40,8 @@ const FEEDBACK_EVERY: Duration = Duration::from_millis(500);
 const SNAPSHOT_EVERY: Duration = Duration::from_millis(180);
 const PEER_TTL: Duration = Duration::from_secs(25);
 const SCAN_EVERY: Duration = Duration::from_secs(12);
+const RECONCILE_EVERY: Duration = Duration::from_secs(1);
+const AUTO_RETRY: Duration = Duration::from_secs(3);
 const PENDING_TTL: Duration = Duration::from_millis(2_500);
 const LISTENER_TTL: Duration = Duration::from_secs(30);
 const MAX_LISTENERS: usize = 24;
@@ -185,6 +187,7 @@ impl Service {
             peers: HashMap::new(),
             broadcast: None,
             receiver: None,
+            intents: HashMap::new(),
             pending: HashMap::new(),
             quality: QualityController::new(),
             sources,
@@ -197,6 +200,7 @@ impl Service {
             next_snapshot: Instant::now() + SNAPSHOT_EVERY,
             next_network_refresh: Instant::now() + Duration::from_secs(5),
             next_scan: Instant::now(),
+            next_reconcile: Instant::now(),
             command_rx,
         };
         thread::Builder::new()
@@ -323,6 +327,7 @@ struct Coordinator {
     peers: HashMap<String, Peer>,
     broadcast: Option<BroadcastRuntime>,
     receiver: Option<ReceiverRuntime>,
+    intents: HashMap<String, ReceiverIntent>,
     pending: HashMap<String, PendingSub>,
     quality: QualityController,
     sources: Vec<AudioSource>,
@@ -335,6 +340,7 @@ struct Coordinator {
     next_snapshot: Instant,
     next_network_refresh: Instant,
     next_scan: Instant,
+    next_reconcile: Instant,
     command_rx: Receiver<Command>,
 }
 
@@ -347,7 +353,15 @@ struct LiveNotice {
 struct PendingSub {
     peer_id: String,
     deadline: Instant,
-    reply: Reply,
+    reply: Option<Reply>,
+}
+
+struct ReceiverIntent {
+    sender_alias: String,
+    source: String,
+    source_kind: String,
+    last_session: Option<u32>,
+    next_attempt: Instant,
 }
 
 struct BroadcastRuntime {
@@ -452,6 +466,10 @@ impl Coordinator {
             }
             if now >= self.next_scan {
                 self.scan_network();
+            }
+            if now >= self.next_reconcile {
+                self.reconcile_receiver(now);
+                self.next_reconcile = now + RECONCILE_EVERY;
             }
             self.expire_pending(now);
             self.prune_peers(now);
@@ -582,7 +600,7 @@ impl Coordinator {
         if self.broadcast.is_some() {
             return Err(anyhow!("已经在广播"));
         }
-        if self.receiver.is_some() || !self.pending.is_empty() {
+        if self.receiver.is_some() || !self.intents.is_empty() || !self.pending.is_empty() {
             return Err(anyhow!("请先停止收听，再开始广播"));
         }
         let source = self
@@ -683,36 +701,29 @@ impl Coordinator {
     }
 
     fn begin_subscribe(&mut self, peer_id: &str, reply: Reply) -> Result<(), String> {
-        if self
-            .receiver
-            .as_ref()
-            .is_some_and(|runtime| runtime.streams.lock().unwrap().contains_key(peer_id))
-        {
+        if self.intents.contains_key(peer_id) {
             let _ = reply.send(Ok(()));
             return Ok(());
         }
-        let outcome: Result<SocketAddr, String> =
-            (|| {
-                if self.broadcast.is_some() {
-                    return Err("广播中不能同时收听".to_owned());
-                }
-                if self.pending.contains_key(peer_id) {
-                    return Err("正在连接这台设备".to_owned());
-                }
-                if self.receiver.as_ref().is_some_and(|runtime| {
-                    runtime.streams.lock().map(|s| s.len()).unwrap_or(0) >= 8
-                }) {
-                    return Err("一次最多收听 8 路音频".to_owned());
-                }
-                let peer = self
-                    .peers
-                    .get(peer_id)
-                    .ok_or_else(|| "设备已离线".to_owned())?;
-                if peer.broadcast.is_none() {
-                    return Err("这台设备当前没有广播".to_owned());
-                }
-                Ok(SocketAddr::new(peer.address.ip(), peer.port))
-            })();
+        let outcome: Result<SocketAddr, String> = (|| {
+            if self.broadcast.is_some() {
+                return Err("广播中不能同时收听".to_owned());
+            }
+            if self.pending.contains_key(peer_id) {
+                return Err("正在连接这台设备".to_owned());
+            }
+            if self.intents.len() >= 8 {
+                return Err("一次最多收听 8 路音频".to_owned());
+            }
+            let peer = self
+                .peers
+                .get(peer_id)
+                .ok_or_else(|| "设备已离线".to_owned())?;
+            if peer.broadcast.is_none() {
+                return Err("这台设备当前没有广播".to_owned());
+            }
+            Ok(SocketAddr::new(peer.address.ip(), peer.port))
+        })();
         let address = match outcome {
             Ok(address) => address,
             Err(message) => {
@@ -735,7 +746,7 @@ impl Coordinator {
             PendingSub {
                 peer_id: peer_id.to_owned(),
                 deadline: Instant::now() + PENDING_TTL,
-                reply,
+                reply: Some(reply),
             },
         );
         self.publish();
@@ -743,25 +754,25 @@ impl Coordinator {
     }
 
     fn unsubscribe(&mut self, sender_id: &str) {
-        let Some(runtime) = self.receiver.as_ref() else {
-            return;
-        };
-        let removed = runtime.streams.lock().unwrap().remove(sender_id);
-        if let Some(stream) = removed {
-            let stream = stream.lock().unwrap();
-            self.send_control(
-                stream.address,
-                &Control::Unsubscribe {
-                    session: stream.session,
-                },
-            );
+        self.intents.remove(sender_id);
+        if let Some(pending) = self.pending.remove(sender_id)
+            && let Some(reply) = pending.reply
+        {
+            let _ = reply.send(Err("已取消收听".to_owned()));
         }
-        let empty = runtime
-            .streams
-            .lock()
-            .map(|streams| streams.is_empty())
-            .unwrap_or(true);
-        if empty {
+        if let Some(runtime) = self.receiver.as_ref() {
+            let removed = runtime.streams.lock().unwrap().remove(sender_id);
+            if let Some(stream) = removed {
+                let stream = stream.lock().unwrap();
+                self.send_control(
+                    stream.address,
+                    &Control::Unsubscribe {
+                        session: stream.session,
+                    },
+                );
+            }
+        }
+        if self.intents.is_empty() && self.pending.is_empty() {
             self.stop_receiver();
         }
         self.publish();
@@ -813,6 +824,104 @@ impl Coordinator {
         Ok(())
     }
 
+    fn reconcile_receiver(&mut self, now: Instant) {
+        if self.intents.is_empty() {
+            return;
+        }
+        let sender_ids = self.intents.keys().cloned().collect::<Vec<_>>();
+        for sender_id in sender_ids {
+            let active_session = self.receiver.as_ref().and_then(|runtime| {
+                runtime.streams.lock().ok().and_then(|streams| {
+                    streams
+                        .get(&sender_id)
+                        .map(|stream| stream.lock().unwrap().session)
+                })
+            });
+            let peer_state = self.peers.get(&sender_id).map(|peer| {
+                (
+                    SocketAddr::new(peer.address.ip(), peer.port),
+                    peer.broadcast.as_ref().map(|broadcast| broadcast.session),
+                )
+            });
+
+            let mut dropped_active = false;
+            if active_session.is_some()
+                && let Some((_, announced)) = peer_state.as_ref()
+                && (announced.is_none()
+                    || announced.is_some_and(|session| Some(session) != active_session))
+            {
+                if let Some(runtime) = self.receiver.as_ref() {
+                    runtime.streams.lock().unwrap().remove(&sender_id);
+                }
+                dropped_active = true;
+                if let Some(intent) = self.intents.get_mut(&sender_id) {
+                    intent.next_attempt = if announced.is_some() {
+                        now
+                    } else {
+                        now + AUTO_RETRY
+                    };
+                }
+            }
+            if dropped_active {
+                log::debug!("receiver stream for {sender_id} is stale; returning to standby");
+                self.publish_soon();
+            }
+
+            let active_now = active_session.is_some() && !dropped_active;
+            let Some((address, Some(session))) = peer_state else {
+                continue;
+            };
+            if let Some(intent) = self.intents.get_mut(&sender_id)
+                && intent.last_session != Some(session)
+            {
+                intent.last_session = Some(session);
+                intent.next_attempt = now;
+            }
+            let ready = now
+                >= self
+                    .intents
+                    .get(&sender_id)
+                    .map(|intent| intent.next_attempt)
+                    .unwrap_or(now);
+            if !active_now && ready && !self.pending.contains_key(&sender_id) {
+                self.auto_subscribe(&sender_id, address, session, now);
+            }
+        }
+    }
+
+    fn auto_subscribe(&mut self, sender_id: &str, address: SocketAddr, session: u32, now: Instant) {
+        if self.broadcast.is_some() {
+            return;
+        }
+        if let Err(error) = self.ensure_receiver() {
+            if let Some(intent) = self.intents.get_mut(sender_id) {
+                intent.next_attempt = now + Duration::from_secs(10);
+            }
+            self.set_notice("warning", error);
+            return;
+        }
+        let subscribe = Control::Subscribe(Subscribe {
+            id: self.settings.id.clone(),
+            alias: self.settings.alias.clone(),
+            platform: std::env::consts::OS.to_owned(),
+        });
+        self.send_control(address, &subscribe);
+        if let Some(intent) = self.intents.get_mut(sender_id) {
+            intent.last_session = Some(session);
+            intent.next_attempt = now + AUTO_RETRY;
+        }
+        self.pending.insert(
+            sender_id.to_owned(),
+            PendingSub {
+                peer_id: sender_id.to_owned(),
+                deadline: now + PENDING_TTL,
+                reply: None,
+            },
+        );
+        log::debug!("attempting automatic resubscribe to {sender_id}");
+        self.publish_soon();
+    }
+
     fn handle_subscribed(&mut self, subscribed: Subscribed, from: SocketAddr) {
         let Some(pending) = self.pending.remove(&subscribed.source_id) else {
             // A late acknowledgement after timeout, or a spoofed reply: there
@@ -821,17 +930,22 @@ impl Coordinator {
             return;
         };
         let Some(runtime) = self.receiver.as_ref() else {
-            let _ = pending.reply.send(Err("输出设备已停止".to_owned()));
+            if let Some(reply) = pending.reply {
+                let _ = reply.send(Err("输出设备已停止".to_owned()));
+            }
             return;
         };
         let now = Instant::now();
         match Decoder::new() {
             Ok(decoder) => {
+                let sender_alias = subscribed.source_alias;
+                let source = subscribed.source;
+                let source_kind = subscribed.source_kind;
                 let stream = ReceiverStream {
                     sender_id: pending.peer_id.clone(),
-                    sender_alias: subscribed.source_alias,
-                    source: subscribed.source,
-                    source_kind: subscribed.source_kind,
+                    sender_alias: sender_alias.clone(),
+                    source: source.clone(),
+                    source_kind: source_kind.clone(),
                     session: subscribed.session,
                     address: from,
                     buffer: StreamBuffer::new(now),
@@ -845,11 +959,28 @@ impl Coordinator {
                     .lock()
                     .unwrap()
                     .insert(pending.peer_id.clone(), Arc::new(Mutex::new(stream)));
-                let _ = pending.reply.send(Ok(()));
+                self.intents.insert(
+                    pending.peer_id.clone(),
+                    ReceiverIntent {
+                        sender_alias,
+                        source,
+                        source_kind,
+                        last_session: Some(subscribed.session),
+                        next_attempt: now + AUTO_RETRY,
+                    },
+                );
+                if let Some(reply) = pending.reply {
+                    let _ = reply.send(Ok(()));
+                }
             }
             Err(error) => {
                 let message = format!("Opus 解码器初始化失败：{error}");
-                let _ = pending.reply.send(Err(message.clone()));
+                if let Some(intent) = self.intents.get_mut(&pending.peer_id) {
+                    intent.next_attempt = now + AUTO_RETRY;
+                }
+                if let Some(reply) = pending.reply {
+                    let _ = reply.send(Err(message.clone()));
+                }
                 self.set_notice("error", message);
             }
         }
@@ -921,6 +1052,7 @@ impl Coordinator {
                 let address = SocketAddr::new(from.ip(), announce.port);
                 let peer = Peer::from_announce(&announce, address);
                 self.peers.insert(announce.id.clone(), peer);
+                self.reconcile_receiver(Instant::now());
                 self.publish_soon();
             }
             Control::Probe { id, announce } => {
@@ -939,6 +1071,7 @@ impl Coordinator {
                     let peer_id = announce.id.clone();
                     self.peers
                         .insert(peer_id, Peer::from_announce(&announce, address));
+                    self.reconcile_receiver(Instant::now());
                     self.publish_soon();
                 }
                 self.send_announce_to(SocketAddr::new(from.ip(), response_port));
@@ -977,15 +1110,15 @@ impl Coordinator {
                         .and_then(|runtime| runtime.streams.lock().unwrap().remove(&key));
                     if let Some(stream) = removed {
                         let alias = stream.lock().unwrap().sender_alias.clone();
-                        self.set_notice("info", format!("{alias} 已停止广播：{reason}"));
+                        if let Some(intent) = self.intents.get_mut(&key) {
+                            intent.next_attempt = Instant::now() + AUTO_RETRY;
+                        }
+                        self.set_notice(
+                            "info",
+                            format!("{alias} 已停止广播，继续守听（{reason}）"),
+                        );
                     }
-                    if self
-                        .receiver
-                        .as_ref()
-                        .is_some_and(|runtime| runtime.streams.lock().unwrap().is_empty())
-                    {
-                        self.stop_receiver();
-                    }
+                    self.publish_soon();
                 }
             }
             Control::Feedback(feedback) => self.handle_feedback(feedback, from),
@@ -1233,12 +1366,15 @@ impl Coordinator {
             .collect::<Vec<_>>();
         for id in expired {
             if let Some(pending) = self.pending.remove(&id) {
-                let _ = pending
-                    .reply
-                    .send(Err("对方没有回应，请确认两台设备在同一局域网".to_owned()));
+                if let Some(reply) = pending.reply {
+                    let _ = reply.send(Err("对方没有回应，请确认两台设备在同一局域网".to_owned()));
+                } else if let Some(intent) = self.intents.get_mut(&id) {
+                    intent.next_attempt = now + AUTO_RETRY;
+                }
             }
         }
-        let unused_receiver = self.pending.is_empty()
+        let unused_receiver = self.intents.is_empty()
+            && self.pending.is_empty()
             && self
                 .receiver
                 .as_ref()
@@ -1288,6 +1424,12 @@ impl Coordinator {
             .and_then(|runtime| runtime.error.lock().ok().and_then(|mut slot| slot.take()));
         if let Some(error) = playback_error {
             self.set_notice("error", format!("播放已中断：{error}"));
+            self.intents.clear();
+            for (_, pending) in self.pending.drain() {
+                if let Some(reply) = pending.reply {
+                    let _ = reply.send(Err("播放已中断".to_owned()));
+                }
+            }
             self.stop_receiver();
         }
     }
@@ -1355,17 +1497,7 @@ impl Coordinator {
                     listeners: broadcast.listeners,
                     codec: broadcast.codec.clone(),
                 }),
-                is_listening: self
-                    .receiver
-                    .as_ref()
-                    .and_then(|runtime| {
-                        runtime
-                            .streams
-                            .lock()
-                            .ok()
-                            .map(|streams| streams.contains_key(&peer.id))
-                    })
-                    .unwrap_or(false),
+                is_listening: self.intents.contains_key(&peer.id),
             })
             .collect::<Vec<_>>();
         peers.sort_by(|left, right| {
@@ -1442,48 +1574,84 @@ impl Coordinator {
             }
         });
 
-        let listening = self
+        let output_name = self
             .receiver
             .as_ref()
-            .map(|runtime| {
-                let output_name = runtime.playback.device_name.clone();
-                let streams = runtime
-                    .streams
-                    .lock()
-                    .map(|streams| streams.values().cloned().collect::<Vec<_>>())
-                    .unwrap_or_default();
-                streams
-                    .into_iter()
-                    .map(|stream| {
-                        let stream = stream.lock().unwrap();
-                        let counters = stream.buffer.counters();
-                        let silent_for = now.saturating_duration_since(stream.last_packet);
-                        let state = if !counters.started || counters.paused {
-                            "buffering"
-                        } else if silent_for > Duration::from_secs(2) {
-                            "waiting"
-                        } else {
-                            "live"
-                        };
-                        ListeningView {
-                            sender_id: stream.sender_id.clone(),
-                            sender_alias: stream.sender_alias.clone(),
-                            source: stream.source.clone(),
-                            source_kind: stream.source_kind.clone(),
-                            state: state.to_owned(),
-                            bitrate_kbps: stream.bitrate_kbps,
-                            buffer_ms: counters.buffered_ms,
-                            target_ms: counters.target_ms,
-                            jitter_ms: counters.jitter_ms,
-                            loss_pct: counters.loss_ratio() * 100.0,
-                            level: stream.level,
-                            output: output_name.clone(),
-                            output_prebuffer_ms: 20,
-                        }
-                    })
-                    .collect::<Vec<_>>()
+            .map(|runtime| runtime.playback.device_name.clone())
+            .or_else(|| {
+                let selected = self.settings.output_id.as_deref();
+                self.outputs
+                    .iter()
+                    .find(|device| selected.map_or(device.is_default, |id| id == device.id))
+                    .map(|device| device.name.clone())
             })
-            .unwrap_or_default();
+            .unwrap_or_else(|| "系统默认输出".to_owned());
+        let mut listening = Vec::<ListeningView>::new();
+        let mut active_ids = HashSet::new();
+        if let Some(runtime) = self.receiver.as_ref() {
+            let streams = runtime
+                .streams
+                .lock()
+                .map(|streams| streams.values().cloned().collect::<Vec<_>>())
+                .unwrap_or_default();
+            for stream in streams {
+                let stream = stream.lock().unwrap();
+                let counters = stream.buffer.counters();
+                let silent_for = now.saturating_duration_since(stream.last_packet);
+                let state = if !counters.started || counters.paused {
+                    "buffering"
+                } else if silent_for > Duration::from_secs(2) {
+                    "waiting"
+                } else {
+                    "live"
+                };
+                active_ids.insert(stream.sender_id.clone());
+                listening.push(ListeningView {
+                    sender_id: stream.sender_id.clone(),
+                    sender_alias: stream.sender_alias.clone(),
+                    source: stream.source.clone(),
+                    source_kind: stream.source_kind.clone(),
+                    state: state.to_owned(),
+                    bitrate_kbps: stream.bitrate_kbps,
+                    buffer_ms: counters.buffered_ms,
+                    target_ms: counters.target_ms,
+                    jitter_ms: counters.jitter_ms,
+                    loss_pct: counters.loss_ratio() * 100.0,
+                    level: stream.level,
+                    output: output_name.clone(),
+                    output_prebuffer_ms: 20,
+                });
+            }
+        }
+        for (sender_id, intent) in &self.intents {
+            if active_ids.contains(sender_id) {
+                continue;
+            }
+            listening.push(ListeningView {
+                sender_id: sender_id.clone(),
+                sender_alias: intent.sender_alias.clone(),
+                source: intent.source.clone(),
+                source_kind: intent.source_kind.clone(),
+                state: "standby".to_owned(),
+                bitrate_kbps: 0,
+                buffer_ms: 0,
+                target_ms: 0,
+                jitter_ms: 0.0,
+                loss_pct: 0.0,
+                level: 0.0,
+                output: output_name.clone(),
+                output_prebuffer_ms: 20,
+            });
+        }
+        listening.sort_by(|left, right| {
+            (left.state == "standby")
+                .cmp(&(right.state == "standby"))
+                .then_with(|| {
+                    left.sender_alias
+                        .to_lowercase()
+                        .cmp(&right.sender_alias.to_lowercase())
+                })
+        });
 
         let notice = self.notice.as_ref().and_then(|notice| {
             if notice.until > now {
