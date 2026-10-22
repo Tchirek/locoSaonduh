@@ -80,7 +80,7 @@ mod tests {
         let mut encoder = Encoder::new().unwrap();
         let mut decoder = Decoder::new().unwrap();
         let mut pcm = vec![0.0f32; FRAME_SAMPLES * CHANNELS];
-        for (i, frame) in pcm.chunks_exact_mut(CHANNELS).enumerate() {
+        for (i, frame) in pcm.as_chunks_mut::<CHANNELS>().0.iter_mut().enumerate() {
             let sample =
                 (i as f32 * 440.0 * std::f32::consts::TAU / SAMPLE_RATE as f32).sin() * 0.2;
             frame[0] = sample;
