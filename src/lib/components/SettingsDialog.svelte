@@ -11,6 +11,7 @@
     onSetSource,
     onSetOutput,
     onRefresh,
+    onProbeAddress,
   }: {
     open?: boolean;
     snapshot: Snapshot;
@@ -20,6 +21,7 @@
     onSetSource: (sourceId: string) => Promise<void>;
     onSetOutput: (outputId: string | null) => Promise<void>;
     onRefresh: () => Promise<void>;
+    onProbeAddress: (address: string) => Promise<void>;
   } = $props();
 
   let dialog: HTMLDialogElement;
@@ -27,6 +29,8 @@
   let savingAlias = $state(false);
   let refreshing = $state(false);
   let savedAt = $state(0);
+  let manualAddress = $state("");
+  let probing = $state(false);
 
   let outputBusy = $derived(
     snapshot.listening.length > 0 || snapshot.pending.length > 0,
@@ -82,6 +86,18 @@
       onError(String(error));
     } finally {
       refreshing = false;
+    }
+  }
+
+  async function probeManual() {
+    if (probing || !manualAddress.trim()) return;
+    probing = true;
+    try {
+      await onProbeAddress(manualAddress.trim());
+    } catch (error) {
+      onError(String(error));
+    } finally {
+      probing = false;
     }
   }
 
@@ -251,6 +267,33 @@
           <dd class="mono">48 kHz · 2 ch</dd>
         </div>
       </dl>
+      <div class="manual-probe">
+        <label for="manual-address">手动探测</label>
+        <div class="probe-row">
+          <input
+            id="manual-address"
+            class="text-input"
+            bind:value={manualAddress}
+            placeholder="192.168.1.24"
+            inputmode="decimal"
+            autocomplete="off"
+            onkeydown={(event) => {
+              if (event.key === "Enter") probeManual();
+            }}
+          />
+          <button
+            type="button"
+            class="button button--small"
+            disabled={probing || !manualAddress.trim()}
+            onclick={probeManual}
+          >
+            {probing ? "发送中" : "查找"}
+          </button>
+        </div>
+        <p>
+          广播被网络或 VPN 隔离时，直接输入对方的局域网 IP。若仍无回应，请允许本应用通过防火墙的专用网络（UDP 53410）。
+        </p>
+      </div>
     </section>
 
     <footer class="dialog-foot">
@@ -489,6 +532,37 @@
     font-size: 11px;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+
+  .manual-probe {
+    margin-top: 17px;
+    padding-top: 15px;
+    border-top: 1px solid var(--rule);
+  }
+
+  .manual-probe > label {
+    display: block;
+    margin-bottom: 7px;
+    color: var(--ink-muted);
+    font-size: 10px;
+  }
+
+  .probe-row {
+    display: flex;
+    gap: 8px;
+  }
+
+  .probe-row .text-input {
+    height: 32px;
+    font-family: var(--mono);
+    font-size: 11px;
+  }
+
+  .manual-probe > p {
+    margin-top: 8px;
+    color: var(--ink-muted);
+    font-size: 10px;
+    line-height: 1.65;
   }
 
   .dialog-foot {

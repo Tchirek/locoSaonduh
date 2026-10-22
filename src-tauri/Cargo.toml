@@ -1,6 +1,6 @@
 [package]
 name = "locosaonduh"
-version = "0.1.0"
+version = "0.1.1"
 description = "Low-latency LAN audio for every speaker in the room"
 authors = ["Tchirek"]
 license = "MIT"

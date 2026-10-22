@@ -9,6 +9,7 @@
     bootstrap,
     onState,
     probeNetwork,
+    probeAddress,
     setAlias,
     setOutput,
     setSource,
@@ -186,6 +187,10 @@
   async function handleRefreshAudio() {
     await refreshAudio();
   }
+
+  async function handleProbeAddress(address: string) {
+    await probeAddress(address);
+  }
 </script>
 
 {#if fatal && !snapshot}
@@ -260,6 +265,7 @@
     onSetSource={handleSetSource}
     onSetOutput={handleSetOutput}
     onRefresh={handleRefreshAudio}
+    onProbeAddress={handleProbeAddress}
   />
 
   {#if toast}

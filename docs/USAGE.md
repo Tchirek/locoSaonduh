@@ -87,8 +87,10 @@ Opus 10 ms 帧     ~10–13 ms
 
 - 确认两台设备在同一网段，而不是一个在 VPN / 访客网络、另一个在主网络。
 - 关闭路由器的 AP isolation / 客户端隔离。
-- 允许应用通过 Windows 防火墙的专用网络；需要放行 UDP 入站端口 `53410`。
-- 虚拟网卡、Clash / FlClash、Steam Streaming 等会暴露多个接口。界面底部显示的是当前选中的局域网地址；对端应能访问这个地址。
+- 允许应用通过 Windows 防火墙的专用网络；需要放行 UDP 入站端口 `53410`。两台设备都要允许。被拒绝过一次后，Windows 不会再次弹窗，需要在“防火墙和网络保护 → 允许应用通过防火墙”里重新勾选专用网络。
+  - 管理员 PowerShell 可直接添加规则：
+    `New-NetFirewallRule -DisplayName "locoSaonduh UDP" -Direction Inbound -Protocol UDP -LocalPort 53410 -Profile Private -Action Allow`
+- 虚拟网卡、Clash / FlClash、Steam Streaming 等会暴露多个接口。v0.1.1 会绑定每个物理接口发送发现包并扫描子网，正常不会再被 VPN 的默认路由吞掉；界面底部显示当前选中的局域网地址，对端应能访问这个地址。
 - 端口 `53410` 被其他程序占用时，应用会启动失败并显示原因。
 
 ## 找不到系统声音

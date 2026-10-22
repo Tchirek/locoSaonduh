@@ -96,6 +96,16 @@ export async function probeNetwork(): Promise<void> {
   return Promise.resolve();
 }
 
+export async function probeAddress(address: string): Promise<void> {
+  if (IS_TAURI) {
+    return invoke("probe_address", { address });
+  }
+  if (!/^\d{1,3}(?:\.\d{1,3}){3}(?::\d+)?$/.test(address.trim())) {
+    throw "IP 地址格式不正确";
+  }
+  return Promise.resolve();
+}
+
 function clone<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
 }
@@ -136,7 +146,7 @@ const baseSnapshot: Snapshot = {
     ip: "192.168.31.42",
     interface: "WLAN",
     port: 53_410,
-    discovery: "UDP 组播 + 广播",
+    discovery: "UDP 组播 + 定向广播 + 子网扫描",
   },
   peers: [
     {

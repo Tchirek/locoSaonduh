@@ -342,14 +342,14 @@
           <div class="empty-peers">
             <Mark size={33} />
             <p class="empty-title">这张网里还没有别的设备。</p>
-            <p>在另一台设备打开 locoSaonduh，通常两秒内就会出现在这里。</p>
+            <p>在另一台设备打开 locoSaonduh，它会自动出现在这里。若没有，请检查防火墙的 UDP 53410 专用网络权限，或在设置里手动探测 IP。</p>
           </div>
         {/if}
 
         <div class="nearby-foot">
           <span class="live-dot" aria-hidden="true"></span>
           <span>
-            UDP 组播 + 广播 · 端口 {snapshot.network.port}
+            {snapshot.network.discovery} · 端口 {snapshot.network.port}
           </span>
         </div>
       </section>
