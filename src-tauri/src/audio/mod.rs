@@ -6,7 +6,7 @@ pub mod playback;
 pub use codec::{Decoder, Encoder};
 pub use convert::{CaptureAdapter, PlaybackAdapter};
 pub use device::{
-    list_output_devices, list_sources, open_capture, AudioSource, OpenCapture, OutputDevice,
-    SourceKind,
+    AudioSource, OpenCapture, OutputDevice, SourceKind, list_output_devices, list_sources,
+    open_capture,
 };
 pub use playback::{PlaybackInfo, PlaybackSink};

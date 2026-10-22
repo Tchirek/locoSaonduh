@@ -14,20 +14,18 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 
-use crate::adaptive::{
-    QualityController, QualityTier, StreamBuffer, FRAME_DURATION,
-};
+use crate::adaptive::{FRAME_DURATION, QualityController, QualityTier, StreamBuffer};
 use crate::audio::{
-    list_output_devices, list_sources, open_capture, AudioSource, Decoder, Encoder, OpenCapture,
-    OutputDevice, PlaybackSink, SourceKind,
+    AudioSource, Decoder, Encoder, OpenCapture, OutputDevice, PlaybackSink, SourceKind,
+    list_output_devices, list_sources, open_capture,
 };
-use crate::net::{bind_discovery_socket, local_network, send_discovery, LocalNetwork};
+use crate::net::{LocalNetwork, bind_discovery_socket, local_network, send_discovery};
 use crate::protocol::{
-    build_audio_packet, is_audio_datagram, parse_audio_packet, Announce, BroadcastAnnounce,
-    CodecAnnounce, Control, Feedback, Peer, Subscribed, Subscribe, CHANNELS, FRAME_SAMPLES,
-    MAX_CONTROL_BYTES,
+    Announce, BroadcastAnnounce, CHANNELS, CodecAnnounce, Control, FRAME_SAMPLES, Feedback,
+    MAX_CONTROL_BYTES, Peer, Subscribe, Subscribed, build_audio_packet, is_audio_datagram,
+    parse_audio_packet,
 };
 use crate::settings::Settings;
 use crate::state::{
@@ -99,7 +97,10 @@ impl Service {
         let outputs = list_output_devices();
         let mut changed = false;
 
-        if !sources.iter().any(|source| Some(&source.id) == settings.source_id.as_ref()) {
+        if !sources
+            .iter()
+            .any(|source| Some(&source.id) == settings.source_id.as_ref())
+        {
             let fallback = sources
                 .iter()
                 .find(|source| source.is_default && source.kind == SourceKind::System)
@@ -119,10 +120,8 @@ impl Service {
             settings.output_id = None;
             changed = true;
         }
-        if changed {
-            if let Err(error) = settings.save(&settings_dir) {
-                log::warn!("could not save normalised settings: {error}");
-            }
+        if changed && let Err(error) = settings.save(&settings_dir) {
+            log::warn!("could not save normalised settings: {error}");
         }
 
         let socket = bind_discovery_socket(port)?;
@@ -215,7 +214,10 @@ impl Service {
     }
 
     pub fn stop_broadcast(&self) -> Result<(), String> {
-        self.call(|reply| Command::StopBroadcast { reply }, Duration::from_secs(3))
+        self.call(
+            |reply| Command::StopBroadcast { reply },
+            Duration::from_secs(3),
+        )
     }
 
     pub fn subscribe(&self, peer_id: impl Into<String>) -> Result<(), String> {
@@ -266,7 +268,10 @@ impl Service {
     }
 
     pub fn refresh_devices(&self) -> Result<(), String> {
-        self.call(|reply| Command::RefreshDevices { reply }, Duration::from_secs(2))
+        self.call(
+            |reply| Command::RefreshDevices { reply },
+            Duration::from_secs(2),
+        )
     }
 
     pub fn probe(&self) -> Result<(), String> {
@@ -434,6 +439,10 @@ impl Coordinator {
                 self.publish();
                 self.next_snapshot = now + SNAPSHOT_EVERY;
             }
+            // Non-blocking intake plus a short yield keeps a 100 Hz audio flow
+            // from monopolising the coordinator while keeping command latency
+            // below a frame.
+            thread::sleep(Duration::from_millis(2));
         }
     }
 
@@ -579,16 +588,16 @@ impl Coordinator {
         let sender = thread::Builder::new()
             .name("loco-encoder".to_owned())
             .spawn(move || {
-                sender_loop(
+                sender_loop(SenderJob {
                     feed,
                     sample_rate,
                     channels,
                     session,
                     socket,
-                    listener_registry,
-                    worker_control,
+                    listeners: listener_registry,
+                    control: worker_control,
                     encoder,
-                );
+                });
             })
             .context("could not start audio sender")?;
 
@@ -636,10 +645,10 @@ impl Coordinator {
         if announce {
             self.announce_now();
         }
-        if let Some(reason) = reason {
-            if reason != "本机已停止广播" {
-                self.set_notice("error", reason);
-            }
+        if let Some(reason) = reason
+            && reason != "本机已停止广播"
+        {
+            self.set_notice("error", reason);
         }
         self.publish();
     }
@@ -653,27 +662,28 @@ impl Coordinator {
             let _ = reply.send(Ok(()));
             return Ok(());
         }
-        let outcome: Result<SocketAddr, String> = (|| {
-            if self.broadcast.is_some() {
-                return Err("广播中不能同时收听".to_owned());
-            }
-            if self.pending.contains_key(peer_id) {
-                return Err("正在连接这台设备".to_owned());
-            }
-            if self.receiver.as_ref().is_some_and(|runtime| {
-                runtime.streams.lock().map(|s| s.len()).unwrap_or(0) >= 8
-            }) {
-                return Err("一次最多收听 8 路音频".to_owned());
-            }
-            let peer = self
-                .peers
-                .get(peer_id)
-                .ok_or_else(|| "设备已离线".to_owned())?;
-            if peer.broadcast.is_none() {
-                return Err("这台设备当前没有广播".to_owned());
-            }
-            Ok(SocketAddr::new(peer.address.ip(), peer.port))
-        })();
+        let outcome: Result<SocketAddr, String> =
+            (|| {
+                if self.broadcast.is_some() {
+                    return Err("广播中不能同时收听".to_owned());
+                }
+                if self.pending.contains_key(peer_id) {
+                    return Err("正在连接这台设备".to_owned());
+                }
+                if self.receiver.as_ref().is_some_and(|runtime| {
+                    runtime.streams.lock().map(|s| s.len()).unwrap_or(0) >= 8
+                }) {
+                    return Err("一次最多收听 8 路音频".to_owned());
+                }
+                let peer = self
+                    .peers
+                    .get(peer_id)
+                    .ok_or_else(|| "设备已离线".to_owned())?;
+                if peer.broadcast.is_none() {
+                    return Err("这台设备当前没有广播".to_owned());
+                }
+                Ok(SocketAddr::new(peer.address.ip(), peer.port))
+            })();
         let address = match outcome {
             Ok(address) => address,
             Err(message) => {
@@ -681,6 +691,10 @@ impl Coordinator {
                 return Err(message);
             }
         };
+        if let Err(message) = self.ensure_receiver() {
+            let _ = reply.send(Err(message.clone()));
+            return Err(message);
+        }
         let control = Control::Subscribe(Subscribe {
             id: self.settings.id.clone(),
             alias: self.settings.alias.clone(),
@@ -745,11 +759,8 @@ impl Coordinator {
             peak,
             underrun_samples,
             error,
-        } = PlaybackSink::open(self.settings.output_id.as_deref()).map_err(|error| {
-            format!(
-                "输出设备无法打开：{error}. 请在右上角设置里换一个输出。"
-            )
-        })?;
+        } = PlaybackSink::open(self.settings.output_id.as_deref())
+            .map_err(|error| format!("输出设备无法打开：{error}. 请在右上角设置里换一个输出。"))?;
         let streams = Arc::new(Mutex::new(HashMap::new()));
         let stop = Arc::new(AtomicBool::new(false));
         let mixer = {
@@ -780,17 +791,6 @@ impl Coordinator {
             log::debug!("unsolicited subscribed from {from}");
             return;
         };
-        if let Err(message) = self.ensure_receiver() {
-            self.send_control(
-                from,
-                &Control::Unsubscribe {
-                    session: subscribed.session,
-                },
-            );
-            let _ = pending.reply.send(Err(message.clone()));
-            self.set_notice("error", message);
-            return;
-        }
         let Some(runtime) = self.receiver.as_ref() else {
             let _ = pending.reply.send(Err("输出设备已停止".to_owned()));
             return;
@@ -829,7 +829,8 @@ impl Coordinator {
 
     fn drain_socket(&mut self) -> Result<()> {
         let mut buffer = [0u8; 2_048];
-        loop {
+        // A bounded batch means a flooded socket cannot starve timers either.
+        for _ in 0..96 {
             match self.socket.recv_from(&mut buffer) {
                 Ok((len, from)) => {
                     let payload = &buffer[..len];
@@ -875,12 +876,9 @@ impl Coordinator {
             return;
         };
         let mut stream = stream.lock().unwrap();
-        stream.buffer.insert_pair(
-            packet.seq,
-            packet.current,
-            packet.previous,
-            Instant::now(),
-        );
+        stream
+            .buffer
+            .insert_pair(packet.seq, packet.current, packet.previous, Instant::now());
         stream.bitrate_kbps = packet.bitrate_kbps as u32;
         stream.last_packet = Instant::now();
     }
@@ -905,15 +903,15 @@ impl Coordinator {
             Control::Subscribe(subscribe) => self.accept_subscriber(subscribe, from),
             Control::Subscribed(subscribed) => self.handle_subscribed(subscribed, from),
             Control::Unsubscribe { session } => {
-                if let Some(runtime) = self.broadcast.as_ref() {
-                    if runtime.session == session {
-                        runtime
-                            .listeners
-                            .lock()
-                            .unwrap()
-                            .retain(|listener| listener.address.ip() != from.ip());
-                        self.announce_now();
-                    }
+                if let Some(runtime) = self.broadcast.as_ref()
+                    && runtime.session == session
+                {
+                    runtime
+                        .listeners
+                        .lock()
+                        .unwrap()
+                        .retain(|listener| listener.address.ip() != from.ip());
+                    self.announce_now();
                 }
             }
             Control::Ended { session, reason } => {
@@ -930,9 +928,10 @@ impl Coordinator {
                         .map(|(id, _)| id.clone())
                 });
                 if let Some(key) = key {
-                    let removed = self.receiver.as_ref().and_then(|runtime| {
-                        runtime.streams.lock().unwrap().remove(&key)
-                    });
+                    let removed = self
+                        .receiver
+                        .as_ref()
+                        .and_then(|runtime| runtime.streams.lock().unwrap().remove(&key));
                     if let Some(stream) = removed {
                         let alias = stream.lock().unwrap().sender_alias.clone();
                         self.set_notice("info", format!("{alias} 已停止广播：{reason}"));
@@ -1051,8 +1050,8 @@ impl Coordinator {
             .streams
             .lock()
             .unwrap()
-            .iter()
-            .map(|(_, stream)| {
+            .values()
+            .map(|stream| {
                 let stream = stream.lock().unwrap();
                 (stream.address, stream.buffer.feedback(stream.session))
             })
@@ -1150,6 +1149,14 @@ impl Coordinator {
                     .send(Err("对方没有回应，请确认两台设备在同一局域网".to_owned()));
             }
         }
+        let unused_receiver = self.pending.is_empty()
+            && self
+                .receiver
+                .as_ref()
+                .is_some_and(|runtime| runtime.streams.lock().unwrap().is_empty());
+        if unused_receiver && self.broadcast.is_none() {
+            self.stop_receiver();
+        }
     }
 
     fn prune_peers(&mut self, now: Instant) {
@@ -1160,14 +1167,14 @@ impl Coordinator {
 
     fn reap_stale_listeners(&mut self, now: Instant) {
         let mut changed = false;
-        if let Some(runtime) = self.broadcast.as_ref() {
-            if let Ok(mut listeners) = runtime.listeners.lock() {
-                let before = listeners.len();
-                listeners.retain(|listener| {
-                    now.saturating_duration_since(listener.last_seen) < LISTENER_TTL
-                });
-                changed = listeners.len() != before;
-            }
+        if let Some(runtime) = self.broadcast.as_ref()
+            && let Ok(mut listeners) = runtime.listeners.lock()
+        {
+            let before = listeners.len();
+            listeners.retain(|listener| {
+                now.saturating_duration_since(listener.last_seen) < LISTENER_TTL
+            });
+            changed = listeners.len() != before;
         }
         if changed {
             self.announce_now();
@@ -1262,7 +1269,13 @@ impl Coordinator {
                 is_listening: self
                     .receiver
                     .as_ref()
-                    .and_then(|runtime| runtime.streams.lock().ok().map(|streams| streams.contains_key(&peer.id)))
+                    .and_then(|runtime| {
+                        runtime
+                            .streams
+                            .lock()
+                            .ok()
+                            .map(|streams| streams.contains_key(&peer.id))
+                    })
                     .unwrap_or(false),
             })
             .collect::<Vec<_>>();
@@ -1376,7 +1389,7 @@ impl Coordinator {
                             loss_pct: counters.loss_ratio() * 100.0,
                             level: stream.level,
                             output: output_name.clone(),
-                            output_delay_ms: 20,
+                            output_prebuffer_ms: 20,
                         }
                     })
                     .collect::<Vec<_>>()
@@ -1393,7 +1406,11 @@ impl Coordinator {
                 None
             }
         });
-        if self.notice.as_ref().is_some_and(|notice| notice.until <= now) {
+        if self
+            .notice
+            .as_ref()
+            .is_some_and(|notice| notice.until <= now)
+        {
             self.notice = None;
         }
 
@@ -1424,7 +1441,7 @@ impl Coordinator {
     }
 }
 
-fn sender_loop(
+struct SenderJob {
     feed: rtrb::Consumer<f32>,
     sample_rate: u32,
     channels: usize,
@@ -1432,8 +1449,20 @@ fn sender_loop(
     socket: Arc<UdpSocket>,
     listeners: Arc<Mutex<Vec<ListenerEntry>>>,
     control: Arc<SenderControl>,
-    mut encoder: Encoder,
-) {
+    encoder: Encoder,
+}
+
+fn sender_loop(job: SenderJob) {
+    let SenderJob {
+        sample_rate,
+        channels,
+        session,
+        socket,
+        listeners,
+        control,
+        mut encoder,
+        feed,
+    } = job;
     let mut adapter = crate::audio::CaptureAdapter::new(channels, sample_rate);
     let mut input = Vec::<f32>::with_capacity(16_384);
     let mut converted = Vec::<f32>::with_capacity(8_192);
@@ -1480,8 +1509,14 @@ fn sender_loop(
                 })
                 .unwrap_or_default();
             if !addresses.is_empty() {
-                let packet =
-                    build_audio_packet(session, seq, timestamp, bitrate as u16, &current, &previous);
+                let packet = build_audio_packet(
+                    session,
+                    seq,
+                    timestamp,
+                    bitrate as u16,
+                    &current,
+                    &previous,
+                );
                 for address in addresses {
                     if let Err(error) = socket.send_to(&packet, address) {
                         control.send_errors.fetch_add(1, Ordering::Relaxed);
@@ -1619,6 +1654,13 @@ mod tests {
     #[test]
     fn audio_datagram_detection_does_not_confuse_json() {
         assert!(!is_audio_datagram(b"{\"type\":\"announce\"}"));
-        assert!(is_audio_datagram(&build_audio_packet(1, 1, 0, 112, &[1], &[])));
+        assert!(is_audio_datagram(&build_audio_packet(
+            1,
+            1,
+            0,
+            112,
+            &[1],
+            &[]
+        )));
     }
 }

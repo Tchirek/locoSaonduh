@@ -7,8 +7,8 @@ pub mod service;
 pub mod settings;
 pub mod state;
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use commands::AppState;
@@ -77,10 +77,10 @@ pub fn run() {
             if let Some(alive) = app_handle.try_state::<Arc<AtomicBool>>() {
                 alive.store(false, Ordering::Release);
             }
-            if let Some(state) = app_handle.try_state::<AppState>() {
-                if let Some(service) = &state.service {
-                    service.shutdown();
-                }
+            if let Some(state) = app_handle.try_state::<AppState>()
+                && let Some(service) = &state.service
+            {
+                service.shutdown();
             }
         }
     });

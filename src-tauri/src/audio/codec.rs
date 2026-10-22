@@ -63,11 +63,7 @@ impl Decoder {
     }
 
     /// Decode one frame. An empty payload asks Opus to conceal the gap.
-    pub fn decode(
-        &mut self,
-        payload: Option<&[u8]>,
-        pcm: &mut [f32],
-    ) -> Result<usize, CodecError> {
+    pub fn decode(&mut self, payload: Option<&[u8]>, pcm: &mut [f32]) -> Result<usize, CodecError> {
         debug_assert_eq!(pcm.len(), FRAME_SAMPLES * CHANNELS);
         let empty = [];
         let input = payload.unwrap_or(&empty);
@@ -85,7 +81,8 @@ mod tests {
         let mut decoder = Decoder::new().unwrap();
         let mut pcm = vec![0.0f32; FRAME_SAMPLES * CHANNELS];
         for (i, frame) in pcm.chunks_exact_mut(CHANNELS).enumerate() {
-            let sample = (i as f32 * 440.0 * std::f32::consts::TAU / SAMPLE_RATE as f32).sin() * 0.2;
+            let sample =
+                (i as f32 * 440.0 * std::f32::consts::TAU / SAMPLE_RATE as f32).sin() * 0.2;
             frame[0] = sample;
             frame[1] = sample;
         }

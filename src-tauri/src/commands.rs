@@ -10,13 +10,11 @@ pub struct AppState {
 
 impl AppState {
     fn service(&self) -> Result<Service, String> {
-        self.service
-            .clone()
-            .ok_or_else(|| {
-                self.startup_error
-                    .clone()
-                    .unwrap_or_else(|| "音频服务未能启动".to_owned())
-            })
+        self.service.clone().ok_or_else(|| {
+            self.startup_error
+                .clone()
+                .unwrap_or_else(|| "音频服务未能启动".to_owned())
+        })
     }
 }
 
@@ -31,10 +29,7 @@ pub async fn snapshot(state: State<'_, AppState>) -> Result<Snapshot, String> {
 }
 
 #[tauri::command]
-pub async fn start_broadcast(
-    state: State<'_, AppState>,
-    source_id: String,
-) -> Result<(), String> {
+pub async fn start_broadcast(state: State<'_, AppState>, source_id: String) -> Result<(), String> {
     let service = state.service()?;
     tauri::async_runtime::spawn_blocking(move || service.start_broadcast(source_id))
         .await

@@ -128,7 +128,7 @@ pub struct ListeningView {
     pub loss_pct: f64,
     pub level: f32,
     pub output: String,
-    pub output_delay_ms: u32,
+    pub output_prebuffer_ms: u32,
 }
 
 #[derive(Debug, Clone, Serialize)]

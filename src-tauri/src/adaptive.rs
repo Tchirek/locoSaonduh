@@ -9,7 +9,7 @@
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
-use crate::protocol::{Feedback, FRAME_MS};
+use crate::protocol::{FRAME_MS, Feedback};
 
 pub const FRAME_DURATION: Duration = Duration::from_millis(FRAME_MS as u64);
 pub const MIN_TARGET_FRAMES: usize = 3;
@@ -82,12 +82,10 @@ impl StreamBuffer {
     pub fn insert_pair(&mut self, seq: u32, current: &[u8], previous: &[u8], now: Instant) {
         self.observe_arrival(seq, now);
         self.insert_one(seq, current, now);
-        if !previous.is_empty() {
-            if seq > 0 {
-                let inserted = self.insert_one(seq - 1, previous, now);
-                if inserted == Insert::New {
-                    self.recovered += 1;
-                }
+        if !previous.is_empty() && seq > 0 {
+            let inserted = self.insert_one(seq - 1, previous, now);
+            if inserted == Insert::New {
+                self.recovered += 1;
             }
         }
         self.last_arrival = Some(now);
@@ -98,13 +96,14 @@ impl StreamBuffer {
             self.first_arrival = Some(now);
             return;
         };
-        let expected_ms = (seq.wrapping_sub(self.base_seq().unwrap_or(seq)) as f64) * FRAME_MS as f64;
+        let expected_ms =
+            (seq.wrapping_sub(self.base_seq().unwrap_or(seq)) as f64) * FRAME_MS as f64;
         let transit_ms = now.saturating_duration_since(first).as_secs_f64() * 1_000.0 - expected_ms;
-        if let (Some(prev_seq), Some(prev_transit)) = (self.last_jitter_seq, self.last_transit_ms) {
-            if seq > prev_seq {
-                let delta = (transit_ms - prev_transit).abs();
-                self.jitter_ms += (delta - self.jitter_ms) / 16.0;
-            }
+        if let (Some(prev_seq), Some(prev_transit)) = (self.last_jitter_seq, self.last_transit_ms)
+            && seq > prev_seq
+        {
+            let delta = (transit_ms - prev_transit).abs();
+            self.jitter_ms += (delta - self.jitter_ms) / 16.0;
         }
         self.last_jitter_seq = Some(seq);
         self.last_transit_ms = Some(transit_ms);
@@ -123,7 +122,10 @@ impl StreamBuffer {
         if self.packets.contains_key(&seq) {
             return Insert::Duplicate;
         }
-        if self.playhead.is_some_and(|head| seq > head.saturating_add(120)) {
+        if self
+            .playhead
+            .is_some_and(|head| seq > head.saturating_add(120))
+        {
             return Insert::TooLate;
         }
         self.packets.insert(seq, payload.to_vec());
@@ -159,9 +161,7 @@ impl StreamBuffer {
         let waited = now.saturating_duration_since(first);
         let buffered = self.packets.len();
         buffered >= self.target_frames
-            || (buffered > 0
-                && waited
-                    >= FrameBudget::startup_grace(self.target_frames))
+            || (buffered > 0 && waited >= FrameBudget::startup_grace(self.target_frames))
     }
 
     pub fn tick(&mut self, now: Instant) -> Option<PlayoutFrame> {
@@ -295,7 +295,8 @@ impl StreamBuffer {
     pub fn is_stable(&self) -> bool {
         self.successive_concealments == 0
             && self.jitter_ms < 12.0
-            && self.clean_since
+            && self
+                .clean_since
                 .map(|at| at.elapsed() > Duration::from_secs(3))
                 .unwrap_or(false)
     }
@@ -358,7 +359,9 @@ impl FrameBudget {
 }
 
 fn desired_base_target(jitter_ms: f64) -> usize {
-    ((jitter_ms / FRAME_MS as f64).ceil() as usize + 2).clamp(MIN_TARGET_FRAMES, 9)
+    // Network jitter is a hint, not a verdict: cap the pre-roll it can buy at
+    // 60 ms. A real buffer shortfall raises the target further, with evidence.
+    ((jitter_ms / FRAME_MS as f64).ceil() as usize + 2).clamp(MIN_TARGET_FRAMES, 6)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -561,7 +564,7 @@ mod tests {
         };
         let mut state = quality.state();
         for _ in 0..6 {
-            state = quality.observe(&[bad.clone()]);
+            state = quality.observe(std::slice::from_ref(&bad));
         }
         assert!(state.bitrate_kbps <= 80);
         assert_eq!(state.tier, QualityTier::Lean);
@@ -574,7 +577,7 @@ mod tests {
             ..bad
         };
         for _ in 0..12 {
-            state = quality.observe(&[good.clone()]);
+            state = quality.observe(std::slice::from_ref(&good));
         }
         assert_eq!(state.bitrate_kbps, 160);
         assert_eq!(state.tier, QualityTier::Studio);

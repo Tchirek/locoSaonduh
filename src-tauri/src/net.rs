@@ -1,9 +1,7 @@
-use std::net::{Ipv4Addr, SocketAddr, UdpSocket};
-use std::sync::Arc;
-use std::time::Duration;
-
 use anyhow::{Context, Result};
 use socket2::{Domain, Protocol, Socket, Type};
+use std::net::{Ipv4Addr, SocketAddr, UdpSocket};
+use std::sync::Arc;
 
 use crate::protocol::{DEFAULT_PORT, MULTICAST_ADDR};
 
@@ -25,9 +23,12 @@ pub fn bind_discovery_socket(port: u16) -> Result<Arc<UdpSocket>> {
     socket
         .bind(&SocketAddr::from((Ipv4Addr::UNSPECIFIED, port)).into())
         .with_context(|| format!("UDP port {port} is already in use"))?;
+    // The session loop polls this socket and must also publish state, answer
+    // commands and send feedback while packets are flowing. A blocking read
+    // would let a continuous stream starve all of that.
     socket
-        .set_read_timeout(Some(Duration::from_millis(40)))
-        .context("could not set socket timeout")?;
+        .set_nonblocking(true)
+        .context("could not make discovery socket non-blocking")?;
     let socket: UdpSocket = socket.into();
     // A missing multicast route must not prevent unicast discovery from
     // working, so this is best-effort.

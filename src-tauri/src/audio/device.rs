@@ -8,7 +8,7 @@
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, Sample, SampleFormat, SizedSample};
 use rtrb::RingBuffer;
@@ -133,7 +133,10 @@ pub fn list_output_devices() -> Vec<OutputDevice> {
                 id: id.to_string(),
                 name: description.name().to_owned(),
                 is_default: default.as_ref() == Some(&device),
-                sample_rate: config.as_ref().map(|c| c.sample_rate()).unwrap_or(SAMPLE_RATE),
+                sample_rate: config
+                    .as_ref()
+                    .map(|c| c.sample_rate())
+                    .unwrap_or(SAMPLE_RATE),
                 channels: config.as_ref().map(|c| c.channels()).unwrap_or(2),
             });
         }
@@ -271,7 +274,9 @@ pub fn open_capture(source: &AudioSource) -> Result<OpenCapture> {
     }
     .context("could not start loopback capture")?;
 
-    stream.play().context("could not start the capture stream")?;
+    stream
+        .play()
+        .context("could not start the capture stream")?;
     if let Some(message) = error_slot.lock().unwrap().take() {
         return Err(anyhow!(message));
     }
@@ -353,5 +358,34 @@ mod tests {
         if !outputs.is_empty() {
             assert!(outputs.iter().filter(|device| device.is_default).count() <= 1);
         }
+    }
+
+    #[test]
+    #[ignore = "requires a real audio endpoint; run manually"]
+    fn system_loopback_delivers_samples() {
+        let sources = list_sources();
+        let Some(source) = sources
+            .iter()
+            .find(|source| source.kind == SourceKind::System)
+            .or_else(|| sources.first())
+        else {
+            return;
+        };
+        let mut capture = open_capture(source).expect("capture should open");
+        std::thread::sleep(std::time::Duration::from_millis(250));
+        let mut samples = 0usize;
+        while capture.feed.pop().is_ok() {
+            samples += 1;
+        }
+        drop(capture);
+        assert!(samples > 0, "the capture callback produced no samples");
+    }
+
+    #[test]
+    #[ignore = "requires a real audio endpoint; run manually"]
+    fn playback_endpoint_opens() {
+        let sink = crate::audio::PlaybackSink::open(None).expect("output should open");
+        std::thread::sleep(std::time::Duration::from_millis(120));
+        drop(sink);
     }
 }
