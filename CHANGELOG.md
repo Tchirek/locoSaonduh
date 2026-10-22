@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.1.2 - 2026-10-23
+
+- Listening is now persistent. When a sender stops, drops off, or restarts with a
+  new session, the receiver keeps the output open in standby and automatically
+  subscribes again when the broadcast returns.
+- The receive console shows `守听中`, keeps the stopped sender visible, and still
+  lets the user disconnect it manually.
+- Automatic resubscription is immediate when a new session is announced and
+  falls back to a bounded retry if the link is still unstable.
+- Added an end-to-end test for stop → standby → automatic resume.
+
 ## 0.1.1 - 2026-10-23
 
 - Fixed discovery when a VPN, virtual adapter, or multi-NIC setup owns the
