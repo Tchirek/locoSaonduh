@@ -1,4 +1,5 @@
 pub mod adaptive;
+pub mod audio;
 pub mod protocol;
 
 pub fn run() {
