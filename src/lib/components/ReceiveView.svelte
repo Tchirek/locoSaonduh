@@ -108,7 +108,7 @@
 
 <div class="page">
   <header class="identity">
-    <Mark size={40} />
+    <Mark size={40} writhing={scanning || entries.length === 0} />
     <div class="identity-copy">
       <h1>{snapshot.identity.alias}</h1>
       <p class="meta num">
