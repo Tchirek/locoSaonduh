@@ -120,7 +120,8 @@ export async function setAutostart(enabled: boolean): Promise<void> {
 
 export async function openVendorPage(): Promise<void> {
   if (IS_TAURI) return invoke("open_vendor_page");
-  window.open(mock.getSnapshot().virtualMic.link, "_blank", "noopener");
+  const link = mock.getSnapshot().virtualMic.link;
+  if (link) window.open(link, "_blank", "noopener");
 }
 
 function clone<T>(value: T): T {
@@ -250,7 +251,6 @@ const baseSnapshot: Snapshot = {
   selectedMic: mics[0].id,
   selectedOutput: null,
   virtualMic: {
-    supported: true,
     enabled: false,
     state: "missing",
     device: null,

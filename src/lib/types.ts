@@ -116,12 +116,11 @@ export interface OutputDevice {
 }
 
 export interface VirtualMic {
-  supported: boolean;
   enabled: boolean;
   state: "missing" | "installing" | "ready" | "restart" | "failed";
   device: string | null;
   provider: string;
-  link: string;
+  link: string | null;
 }
 
 export interface Prefs {

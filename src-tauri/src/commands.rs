@@ -144,17 +144,15 @@ pub fn set_autostart(app: AppHandle, enabled: bool) -> Result<(), String> {
 
 #[tauri::command]
 pub fn open_vendor_page() -> Result<(), String> {
-    if virtual_mic::LINK.is_empty() {
-        return Err("没有可打开的页面".to_owned());
-    }
+    let link = virtual_mic::LINK.ok_or("没有可打开的页面")?;
     #[cfg(target_os = "windows")]
-    let mut command = std::process::Command::new("explorer.exe");
+    let opener = "explorer.exe";
     #[cfg(target_os = "macos")]
-    let mut command = std::process::Command::new("open");
-    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-    let mut command = std::process::Command::new("xdg-open");
-    command
-        .arg(virtual_mic::LINK)
+    let opener = "open";
+    #[cfg(target_os = "linux")]
+    let opener = "xdg-open";
+    std::process::Command::new(opener)
+        .arg(link)
         .spawn()
         .map(|_| ())
         .map_err(|error| error.to_string())

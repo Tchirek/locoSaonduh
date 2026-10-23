@@ -8,21 +8,11 @@ use super::device::OutputDevice;
 pub const PROVIDER: &str = "VB-CABLE";
 #[cfg(target_os = "linux")]
 pub const PROVIDER: &str = "PulseAudio";
-#[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
-pub const PROVIDER: &str = "";
 
 #[cfg(any(target_os = "windows", target_os = "macos"))]
-pub const LINK: &str = "https://vb-audio.com/Cable/";
-#[cfg(not(any(target_os = "windows", target_os = "macos")))]
-pub const LINK: &str = "";
-
-pub fn supported() -> bool {
-    cfg!(any(
-        target_os = "windows",
-        target_os = "macos",
-        target_os = "linux"
-    ))
-}
+pub const LINK: Option<&str> = Some("https://vb-audio.com/Cable/");
+#[cfg(target_os = "linux")]
+pub const LINK: Option<&str> = None;
 
 pub fn find(outputs: &[OutputDevice]) -> Option<OutputDevice> {
     candidates(outputs).into_iter().next()
@@ -81,10 +71,6 @@ pub fn install() -> Result<()> {
     #[cfg(target_os = "linux")]
     {
         linux::prepare()
-    }
-    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
-    {
-        Err(anyhow::anyhow!("unsupported"))
     }
 }
 

@@ -1122,9 +1122,6 @@ impl Coordinator {
     }
 
     fn set_virtual_mic(&mut self, enabled: bool) -> Result<(), String> {
-        if !virtual_mic::supported() {
-            return Err("这台设备不支持虚拟麦克风".to_owned());
-        }
         self.settings.virtual_mic = enabled;
         self.save();
         if enabled {
@@ -2064,7 +2061,6 @@ impl Coordinator {
             selected_mic: self.settings.mic_id.clone(),
             selected_output: self.settings.output_id.clone(),
             virtual_mic: VirtualMicView {
-                supported: virtual_mic::supported(),
                 enabled: self.settings.virtual_mic,
                 state: self.virtual_state.label().to_owned(),
                 device: self
@@ -2072,7 +2068,7 @@ impl Coordinator {
                     .as_ref()
                     .map(|device| device.name.clone()),
                 provider: virtual_mic::PROVIDER.to_owned(),
-                link: virtual_mic::LINK.to_owned(),
+                link: virtual_mic::LINK.map(str::to_owned),
             },
             prefs: PrefsView {
                 restore: self.settings.restore,

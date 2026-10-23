@@ -41,7 +41,7 @@ impl SourceKind {
     pub fn parse(value: &str) -> Option<Self> {
         match value {
             "system" => Some(Self::System),
-            "microphone" | "mic" => Some(Self::Microphone),
+            "microphone" => Some(Self::Microphone),
             _ => None,
         }
     }

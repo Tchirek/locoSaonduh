@@ -130,36 +130,34 @@
           <ChevronDown size={15} strokeWidth={1.7} />
         </span>
       </div>
-      {#if virtual.supported}
-        <div class="setting">
-          <span class="setting-label">
-            虚拟麦克风
-            <small>
-              {#if virtual.state === "installing" && virtual.enabled}
-                正在安装 {virtual.provider}…
-              {:else if virtual.state === "restart"}
-                重启后生效
-              {:else if virtual.enabled && virtual.device}
-                → {virtual.device}
-              {:else if virtual.link}
-                <button type="button" class="vendor" onclick={openVendorPage}>
-                  {virtual.provider} · VB-Audio 捐赠软件<ExternalLink size={11} />
-                </button>
-              {:else}
-                {virtual.provider}
-              {/if}
-            </small>
-          </span>
-          <span class="setting-switch">
-            <Switch
-              label="虚拟麦克风"
-              checked={virtual.enabled}
-              busy={virtualBusy}
-              onchange={onSetVirtualMic}
-            />
-          </span>
-        </div>
-      {/if}
+      <div class="setting">
+        <span class="setting-label">
+          虚拟麦克风
+          <small>
+            {#if virtual.state === "installing" && virtual.enabled}
+              正在安装 {virtual.provider}…
+            {:else if virtual.state === "restart"}
+              重启后生效
+            {:else if virtual.enabled && virtual.device}
+              → {virtual.device}
+            {:else if virtual.link}
+              <button type="button" class="vendor" onclick={openVendorPage}>
+                {virtual.provider} · VB-Audio 捐赠软件<ExternalLink size={11} />
+              </button>
+            {:else}
+              {virtual.provider}
+            {/if}
+          </small>
+        </span>
+        <span class="setting-switch">
+          <Switch
+            label="虚拟麦克风"
+            checked={virtual.enabled}
+            busy={virtualBusy}
+            onchange={onSetVirtualMic}
+          />
+        </span>
+      </div>
     </div>
   </section>
 

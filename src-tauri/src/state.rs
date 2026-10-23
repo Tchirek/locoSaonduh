@@ -43,12 +43,11 @@ pub struct NetworkView {
 #[derive(Debug, Clone, Serialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct VirtualMicView {
-    pub supported: bool,
     pub enabled: bool,
     pub state: String,
     pub device: Option<String>,
     pub provider: String,
-    pub link: String,
+    pub link: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Default)]
