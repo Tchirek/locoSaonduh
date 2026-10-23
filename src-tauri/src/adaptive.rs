@@ -30,7 +30,7 @@ pub enum Insert {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlayoutFrame {
-    pub seq: u32,
+    pub seq: u64,
     /// `None` asks the decoder to conceal a gap.
     pub payload: Option<Vec<u8>>,
 }
@@ -38,7 +38,7 @@ pub struct PlayoutFrame {
 // 遅れ来る 雁を数へて 宿を取る
 #[derive(Debug)]
 struct DelayEstimator {
-    origin: Option<(Instant, u32)>,
+    origin: Option<(Instant, u64)>,
     floor: VecDeque<(Instant, f64)>,
     histogram: Vec<f64>,
     mass: f64,
@@ -58,13 +58,13 @@ impl DelayEstimator {
         }
     }
 
-    fn transit(&mut self, seq: u32, now: Instant) -> f64 {
+    fn transit(&mut self, seq: u64, now: Instant) -> f64 {
         let (origin, base) = *self.origin.get_or_insert((now, seq));
-        let sent_ms = seq.wrapping_sub(base) as i32 as f64 * FRAME_MS as f64;
+        let sent_ms = (seq as f64 - base as f64) * FRAME_MS as f64;
         now.saturating_duration_since(origin).as_secs_f64() * 1_000.0 - sent_ms
     }
 
-    fn observe(&mut self, seq: u32, now: Instant) {
+    fn observe(&mut self, seq: u64, now: Instant) {
         let transit = self.transit(seq, now);
         // 揺らぎをば 十六分の 一で追ふ
         if let Some(last) = self.last_transit {
@@ -84,7 +84,7 @@ impl DelayEstimator {
         }
     }
 
-    fn record(&mut self, seq: u32, now: Instant) {
+    fn record(&mut self, seq: u64, now: Instant) {
         let Some(&(_, floor)) = self.floor.front() else {
             return;
         };
@@ -115,8 +115,9 @@ impl DelayEstimator {
 
 #[derive(Debug)]
 pub struct StreamBuffer {
-    packets: BTreeMap<u32, Vec<u8>>,
-    playhead: Option<u32>,
+    packets: BTreeMap<u64, Vec<u8>>,
+    playhead: Option<u64>,
+    newest: Option<u64>,
     target_ms: f64,
     delay: DelayEstimator,
     started: bool,
@@ -138,6 +139,7 @@ impl StreamBuffer {
         Self {
             packets: BTreeMap::new(),
             playhead: None,
+            newest: None,
             target_ms: START_TARGET_MS,
             delay: DelayEstimator::new(),
             started: false,
@@ -158,6 +160,9 @@ impl StreamBuffer {
     /// Feed both Opus frames carried by one datagram. `previous` is the frame
     /// before `seq`; it is absent for the first packet.
     pub fn insert_pair(&mut self, seq: u32, current: &[u8], previous: &[u8], now: Instant) {
+        let Some(seq) = self.extend(seq) else {
+            return;
+        };
         self.delay.observe(seq, now);
         match self.insert_one(seq, current, now) {
             Insert::New | Insert::TooLate => self.delay.record(seq, now),
@@ -176,7 +181,19 @@ impl StreamBuffer {
         self.last_arrival = Some(now);
     }
 
-    fn insert_one(&mut self, seq: u32, payload: &[u8], now: Instant) -> Insert {
+    // 四十億 巡りて後も 数へ継ぐ
+    fn extend(&mut self, seq: u32) -> Option<u64> {
+        let Some(newest) = self.newest else {
+            self.newest = Some(seq.into());
+            return Some(seq.into());
+        };
+        let step = seq.wrapping_sub(newest as u32) as i32 as i64;
+        let extended = u64::try_from(newest as i64 + step).ok()?;
+        self.newest = Some(newest.max(extended));
+        Some(extended)
+    }
+
+    fn insert_one(&mut self, seq: u64, payload: &[u8], now: Instant) -> Insert {
         if self.playhead.is_some_and(|head| seq < head) {
             return Insert::TooLate;
         }
@@ -245,7 +262,7 @@ impl StreamBuffer {
         self.clean_since = Some(now);
     }
 
-    fn discard_before(&mut self, head: u32) {
+    fn discard_before(&mut self, head: u64) {
         while self
             .packets
             .first_key_value()
@@ -671,11 +688,39 @@ mod tests {
             buffer.insert_pair(seq, &frame(1), &frame(1), burst);
         }
         let first = buffer.tick(burst).unwrap();
-        let behind_ms = (140 - first.seq) * FRAME_MS;
+        let behind_ms = (140 - first.seq) as u32 * FRAME_MS;
         assert!(
             behind_ms <= buffer.target_ms() + FRAME_MS,
             "{behind_ms} ms behind"
         );
+    }
+
+    #[test]
+    fn sequence_numbers_survive_wrapping() {
+        let t0 = Instant::now();
+        let mut buffer = StreamBuffer::new(t0);
+        let start = u32::MAX - 300;
+        for index in 0..600u32 {
+            let now = at(t0, index as u64 * 10);
+            let seq = start.wrapping_add(index);
+            buffer.insert_pair(seq, &frame(1), &frame(1), now);
+            let _ = buffer.tick(now);
+        }
+        let counters = buffer.counters();
+        assert_eq!(counters.concealed, 0);
+        assert!(counters.played > 550, "{} played", counters.played);
+        assert!(buffer.jitter_ms() < 0.5, "{}", buffer.jitter_ms());
+    }
+
+    #[test]
+    fn a_long_running_stream_keeps_its_delay_scale() {
+        let t0 = Instant::now();
+        let mut delay = DelayEstimator::new();
+        delay.observe(0, t0);
+        let far: u32 = 3_000_000_000;
+        let later = t0 + Duration::from_millis(far as u64 * FRAME_MS as u64);
+        delay.observe(far.into(), later);
+        assert!(delay.jitter_ms < 1.0, "{}", delay.jitter_ms);
     }
 
     #[test]
