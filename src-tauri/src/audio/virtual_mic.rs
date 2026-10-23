@@ -127,10 +127,9 @@ $setup = Join-Path $dir $name
 $sig = Get-AuthenticodeSignature $setup
 if ($sig.Status -ne 'Valid' -or $sig.SignerCertificate.Subject -notmatch 'BUREL VINCENT') { throw 'signature' }
 try {
-  $p = Start-Process -FilePath $setup -ArgumentList '-i','-h' -Verb RunAs -Wait -PassThru
+  Start-Process -FilePath $setup -ArgumentList '-i','-h' -Verb RunAs -Wait
 } catch { throw 'cancelled' }
 Remove-Item $dir -Recurse -Force -ErrorAction SilentlyContinue
-exit $p.ExitCode
 "#;
 
     pub fn install() -> Result<()> {
