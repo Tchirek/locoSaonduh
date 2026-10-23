@@ -17,9 +17,11 @@ pub fn device_id(name: &str) -> String {
     cpal::DeviceId::new(cpal::HostId::PulseAudio, name).to_string()
 }
 
+/// 秋の灯に 訛りを抜きて 文字を読む
 pub fn pactl(args: &[&str]) -> Result<String> {
     let output = Command::new("pactl")
         .args(args)
+        .env("LC_ALL", "C")
         .output()
         .context("pactl is not available")?;
     if !output.status.success() {
@@ -33,13 +35,8 @@ pub fn pactl(args: &[&str]) -> Result<String> {
 }
 
 pub fn default_sink() -> Result<String> {
-    if let Ok(name) = pactl(&["get-default-sink"])
-        && !name.is_empty()
-    {
-        return Ok(name);
-    }
-    let info = pactl(&["info"])?;
-    info.lines()
+    pactl(&["info"])?
+        .lines()
         .find_map(|line| line.strip_prefix("Default Sink: "))
         .map(str::to_owned)
         .ok_or_else(|| anyhow!("no default sink"))
