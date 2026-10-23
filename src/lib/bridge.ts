@@ -134,14 +134,12 @@ const mics: AudioSource[] = [
     id: "mic|preview-array",
     name: "麦克风阵列 (Realtek Audio)",
     kind: "microphone",
-    detail: "48 kHz · 2 声道",
     isDefault: true,
   },
   {
     id: "mic|preview-usb",
     name: "USB 麦克风",
     kind: "microphone",
-    detail: "48 kHz · 1 声道",
     isDefault: false,
   },
 ];

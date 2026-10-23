@@ -104,7 +104,6 @@ export interface AudioSource {
   id: string;
   name: string;
   kind: Kind;
-  detail: string;
   isDefault: boolean;
 }
 

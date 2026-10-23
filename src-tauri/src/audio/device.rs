@@ -20,7 +20,6 @@ pub struct AudioSource {
     pub id: String,
     pub name: String,
     pub kind: SourceKind,
-    pub detail: String,
     pub is_default: bool,
 }
 
@@ -63,7 +62,6 @@ pub fn system_source() -> AudioSource {
         id: SYSTEM_SOURCE_ID.to_owned(),
         name: "系统声音".to_owned(),
         kind: SourceKind::System,
-        detail: system::DETAIL.to_owned(),
         is_default: true,
     }
 }
@@ -86,19 +84,10 @@ pub fn list_microphones(hide: impl Fn(&str, &str) -> bool) -> Vec<AudioSource> {
             if system::is_monitor(&id) || hide(&id, &name) {
                 continue;
             }
-            let details = device.default_input_config().ok();
             sources.push(AudioSource {
                 id: format!("mic|{id}"),
                 name,
                 kind: SourceKind::Microphone,
-                detail: match &details {
-                    Some(config) => format!(
-                        "{} kHz · {} 声道",
-                        config.sample_rate() / 1_000,
-                        config.channels()
-                    ),
-                    None => String::new(),
-                },
                 is_default: default_input.as_ref() == Some(&device),
             });
         }

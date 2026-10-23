@@ -9,15 +9,6 @@ pub use macos_impl::{ExcludingTap, open};
 #[cfg(target_os = "linux")]
 pub use linux_impl::{Takeover, cleanup_stale, open};
 
-#[cfg(target_os = "windows")]
-pub const DETAIL: &str = "WASAPI";
-#[cfg(target_os = "macos")]
-pub const DETAIL: &str = "Core Audio";
-#[cfg(target_os = "linux")]
-pub const DETAIL: &str = "PulseAudio";
-#[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
-pub const DETAIL: &str = "";
-
 #[cfg(target_os = "linux")]
 pub fn is_monitor(device_id: &str) -> bool {
     device_id.ends_with(".monitor")
