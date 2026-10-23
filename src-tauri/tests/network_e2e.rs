@@ -92,7 +92,9 @@ fn a_udp_listener_hears_the_sender() {
     assert!(acknowledged, "sender did not acknowledge the subscription");
     assert!(received_audio, "sender did not deliver audio datagrams");
 
-    service.stop_broadcast().expect("broadcast should stop");
+    service
+        .stop_stream(SourceKind::System)
+        .expect("broadcast should stop");
     service.shutdown();
     let _ = std::fs::remove_dir_all(dir);
 }
@@ -204,7 +206,7 @@ fn a_subscribed_receiver_decodes_audio() {
     });
 
     service
-        .subscribe("e2e-sender")
+        .subscribe("e2e-sender#system")
         .expect("receiver should subscribe");
     let snapshot = wait_for(&service, |snapshot| {
         snapshot
@@ -217,7 +219,7 @@ fn a_subscribed_receiver_decodes_audio() {
         "playout lost {:?}",
         snapshot.listening[0]
     );
-    service.unsubscribe("e2e-sender").unwrap();
+    service.unsubscribe("e2e-sender#system").unwrap();
     fake.join().unwrap();
     service.shutdown();
     let _ = std::fs::remove_dir_all(dir);
@@ -453,7 +455,7 @@ fn a_listener_stays_on_standby_and_reconnects() {
     });
 
     service
-        .subscribe("e2e-standby")
+        .subscribe("e2e-standby#system")
         .expect("initial subscribe should work");
     wait_for(&service, |snapshot| {
         snapshot
@@ -478,7 +480,7 @@ fn a_listener_stays_on_standby_and_reconnects() {
             .iter()
             .any(|stream| stream.state == "live")
     });
-    service.unsubscribe("e2e-standby").unwrap();
+    service.unsubscribe("e2e-standby#system").unwrap();
     fake.join().unwrap();
     service.shutdown();
     let _ = std::fs::remove_dir_all(dir);
@@ -563,8 +565,8 @@ fn two_devices_play_each_other() {
         }
     }
 
-    a.unsubscribe(id_b).unwrap();
-    b.unsubscribe(id_a).unwrap();
+    a.unsubscribe(format!("{id_b}#system")).unwrap();
+    b.unsubscribe(format!("{id_a}#system")).unwrap();
     a.shutdown();
     b.shutdown();
     let _ = std::fs::remove_dir_all(dir_a);

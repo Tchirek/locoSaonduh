@@ -67,7 +67,7 @@ enum Command {
         reply: Reply,
     },
     StopStream {
-        kind: Option<SourceKind>,
+        kind: SourceKind,
         reply: Reply,
     },
     Subscribe {
@@ -119,6 +119,11 @@ enum Command {
 
 pub fn stream_key(peer_id: &str, kind: SourceKind) -> String {
     format!("{peer_id}#{}", kind.label())
+}
+
+fn parse_key(key: &str) -> Option<(String, SourceKind)> {
+    let (peer_id, kind) = key.split_once('#')?;
+    Some((peer_id.to_owned(), SourceKind::parse(kind)?))
 }
 
 impl Service {
@@ -214,27 +219,7 @@ impl Service {
 
     pub fn stop_stream(&self, kind: SourceKind) -> Result<(), String> {
         self.call(
-            |reply| Command::StopStream {
-                kind: Some(kind),
-                reply,
-            },
-            Duration::from_secs(3),
-        )
-    }
-
-    pub fn start_broadcast(&self, source_id: impl Into<String>) -> Result<(), String> {
-        let source_id = source_id.into();
-        if source_id.starts_with("mic|") {
-            self.set_mic(source_id)?;
-            self.start_stream(SourceKind::Microphone)
-        } else {
-            self.start_stream(SourceKind::System)
-        }
-    }
-
-    pub fn stop_broadcast(&self) -> Result<(), String> {
-        self.call(
-            |reply| Command::StopStream { kind: None, reply },
+            |reply| Command::StopStream { kind, reply },
             Duration::from_secs(3),
         )
     }
@@ -629,14 +614,8 @@ impl Coordinator {
                 let _ = reply.send(result);
             }
             Command::StopStream { kind, reply } => {
-                let kinds = match kind {
-                    Some(kind) => vec![kind],
-                    None => vec![SourceKind::System, SourceKind::Microphone],
-                };
-                for kind in kinds {
-                    self.stop_stream(kind, Some(LOCAL_STOP.to_owned()), true);
-                    self.remember_stream(kind, false);
-                }
+                self.stop_stream(kind, Some(LOCAL_STOP.to_owned()), true);
+                self.remember_stream(kind, false);
                 let _ = reply.send(Ok(()));
             }
             Command::Subscribe { key, reply } => {
@@ -899,20 +878,10 @@ impl Coordinator {
         self.publish();
     }
 
-    fn resolve_key(&self, key: &str) -> Option<(String, SourceKind)> {
-        if let Some((peer, kind)) = key.split_once('#') {
-            return Some((peer.to_owned(), SourceKind::parse(kind)?));
-        }
-        let peer = self.peers.get(key)?;
-        let kind = SourceKind::parse(&peer.primary()?.source_kind)?;
-        Some((key.to_owned(), kind))
-    }
-
     fn begin_subscribe(&mut self, key: &str, reply: Reply) -> Result<(), String> {
         let outcome: Result<(String, SourceKind, SocketAddr, u32), String> = (|| {
-            let (peer_id, kind) = self
-                .resolve_key(key)
-                .ok_or_else(|| "这台设备当前没有广播".to_owned())?;
+            let (peer_id, kind) =
+                parse_key(key).ok_or_else(|| "这台设备当前没有广播".to_owned())?;
             let key = stream_key(&peer_id, kind);
             if self.pending.contains_key(&key) {
                 return Err("正在连接这台设备".to_owned());
@@ -983,40 +952,25 @@ impl Coordinator {
     }
 
     fn unsubscribe(&mut self, key: &str) {
-        let keys = if key.contains('#') {
-            vec![key.to_owned()]
-        } else {
-            let prefix = format!("{key}#");
-            self.intents
-                .keys()
-                .chain(self.pending.keys())
-                .filter(|candidate| candidate.starts_with(&prefix))
-                .cloned()
-                .collect::<HashSet<_>>()
-                .into_iter()
-                .collect()
-        };
-        for key in keys {
-            self.intents.remove(&key);
-            if let Some(pending) = self.pending.remove(&key)
-                && let Some(reply) = pending.reply
-            {
-                let _ = reply.send(Err("已取消收听".to_owned()));
-            }
-            if let Some(runtime) = self.receiver.as_ref() {
-                let removed = runtime.streams.lock().unwrap().remove(&key);
-                if let Some(stream) = removed {
-                    let stream = stream.lock().unwrap();
-                    self.send_control(
-                        stream.address,
-                        &Control::Unsubscribe {
-                            session: stream.session,
-                        },
-                    );
-                }
-            }
-            self.forget_listen(&key);
+        self.intents.remove(key);
+        if let Some(pending) = self.pending.remove(key)
+            && let Some(reply) = pending.reply
+        {
+            let _ = reply.send(Err("已取消收听".to_owned()));
         }
+        if let Some(runtime) = self.receiver.as_ref() {
+            let removed = runtime.streams.lock().unwrap().remove(key);
+            if let Some(stream) = removed {
+                let stream = stream.lock().unwrap();
+                self.send_control(
+                    stream.address,
+                    &Control::Unsubscribe {
+                        session: stream.session,
+                    },
+                );
+            }
+        }
+        self.forget_listen(key);
         if self.intents.is_empty() && self.pending.is_empty() {
             self.stop_receiver();
         } else {
@@ -2389,6 +2343,12 @@ mod tests {
     fn stream_keys_pair_a_device_with_one_kind() {
         assert_eq!(stream_key("abc", SourceKind::System), "abc#system");
         assert_eq!(stream_key("abc", SourceKind::Microphone), "abc#microphone");
+        assert_eq!(
+            parse_key("abc#microphone"),
+            Some(("abc".to_owned(), SourceKind::Microphone))
+        );
+        assert_eq!(parse_key("abc"), None);
+        assert_eq!(parse_key("abc#speaker"), None);
     }
 
     #[test]
