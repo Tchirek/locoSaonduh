@@ -6,20 +6,27 @@
 //! codec bitrate. The receiver grows its own playout delay when jitter makes it
 //! miss a frame, and walks it back once the path is quiet again.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::time::{Duration, Instant};
 
 use crate::protocol::{FRAME_MS, Feedback};
 
 pub const FRAME_DURATION: Duration = Duration::from_millis(FRAME_MS as u64);
-pub const MIN_TARGET_FRAMES: usize = 3;
-pub const MAX_TARGET_FRAMES: usize = 12;
+pub const MIN_TARGET_MS: f64 = 30.0;
+pub const MAX_TARGET_MS: f64 = 200.0;
+const START_TARGET_MS: f64 = 40.0;
+const DELAY_BUCKETS: usize = 256;
+const DELAY_QUANTILE: f64 = 0.97;
+const DELAY_FORGET: f64 = 0.995;
+const FLOOR_WINDOW: Duration = Duration::from_secs(2);
+const TARGET_DECAY_MS_PER_S: f64 = 2.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Insert {
     New,
     Duplicate,
     TooLate,
+    OutOfRange,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -29,19 +36,95 @@ pub struct PlayoutFrame {
     pub payload: Option<Vec<u8>>,
 }
 
+// 遅れ来る 雁を数へて 宿を取る
+#[derive(Debug)]
+struct DelayEstimator {
+    origin: Option<(Instant, u32)>,
+    floor: VecDeque<(Instant, f64)>,
+    histogram: Vec<f64>,
+    mass: f64,
+    last_transit: Option<f64>,
+    jitter_ms: f64,
+}
+
+impl DelayEstimator {
+    fn new() -> Self {
+        Self {
+            origin: None,
+            floor: VecDeque::with_capacity(256),
+            histogram: vec![0.0; DELAY_BUCKETS],
+            mass: 0.0,
+            last_transit: None,
+            jitter_ms: 0.0,
+        }
+    }
+
+    fn transit(&mut self, seq: u32, now: Instant) -> f64 {
+        let (origin, base) = *self.origin.get_or_insert((now, seq));
+        let sent_ms = seq.wrapping_sub(base) as i32 as f64 * FRAME_MS as f64;
+        now.saturating_duration_since(origin).as_secs_f64() * 1_000.0 - sent_ms
+    }
+
+    fn observe(&mut self, seq: u32, now: Instant) {
+        let transit = self.transit(seq, now);
+        // 揺らぎをば 十六分の 一で追ふ
+        if let Some(last) = self.last_transit {
+            self.jitter_ms += ((transit - last).abs() - self.jitter_ms) / 16.0;
+        }
+        self.last_transit = Some(transit);
+        while self.floor.back().is_some_and(|&(_, low)| low >= transit) {
+            self.floor.pop_back();
+        }
+        self.floor.push_back((now, transit));
+        while self
+            .floor
+            .front()
+            .is_some_and(|&(at, _)| now.saturating_duration_since(at) > FLOOR_WINDOW)
+        {
+            self.floor.pop_front();
+        }
+    }
+
+    fn record(&mut self, seq: u32, now: Instant) {
+        let Some(&(_, floor)) = self.floor.front() else {
+            return;
+        };
+        let relative = (self.transit(seq, now) - floor).max(0.0);
+        let bucket = (relative as usize).min(DELAY_BUCKETS - 1);
+        for weight in &mut self.histogram {
+            *weight *= DELAY_FORGET;
+        }
+        self.histogram[bucket] += 1.0 - DELAY_FORGET;
+        self.mass = self.mass * DELAY_FORGET + (1.0 - DELAY_FORGET);
+    }
+
+    fn quantile(&self, q: f64) -> Option<f64> {
+        if self.mass < 0.2 {
+            return None;
+        }
+        let goal = self.mass * q;
+        let mut sum = 0.0;
+        for (bucket, weight) in self.histogram.iter().enumerate() {
+            sum += weight;
+            if sum >= goal {
+                return Some(bucket as f64 + 1.0);
+            }
+        }
+        Some(DELAY_BUCKETS as f64)
+    }
+}
+
 #[derive(Debug)]
 pub struct StreamBuffer {
     packets: BTreeMap<u32, Vec<u8>>,
     playhead: Option<u32>,
-    target_frames: usize,
-    base_target: usize,
+    target_ms: f64,
+    delay: DelayEstimator,
     started: bool,
     paused: bool,
     first_arrival: Option<Instant>,
     last_arrival: Option<Instant>,
-    last_jitter_seq: Option<u32>,
-    last_transit_ms: Option<f64>,
-    jitter_ms: f64,
+    last_tick: Option<Instant>,
     received: u64,
     recovered: u64,
     concealed: u64,
@@ -57,15 +140,13 @@ impl StreamBuffer {
         Self {
             packets: BTreeMap::new(),
             playhead: None,
-            target_frames: MIN_TARGET_FRAMES,
-            base_target: MIN_TARGET_FRAMES,
+            target_ms: START_TARGET_MS,
+            delay: DelayEstimator::new(),
             started: false,
             paused: false,
             first_arrival: Some(now),
             last_arrival: None,
-            last_jitter_seq: None,
-            last_transit_ms: None,
-            jitter_ms: 0.0,
+            last_tick: None,
             received: 0,
             recovered: 0,
             concealed: 0,
@@ -80,39 +161,22 @@ impl StreamBuffer {
     /// Feed both Opus frames carried by one datagram. `previous` is the frame
     /// before `seq`; it is absent for the first packet.
     pub fn insert_pair(&mut self, seq: u32, current: &[u8], previous: &[u8], now: Instant) {
-        self.observe_arrival(seq, now);
-        self.insert_one(seq, current, now);
+        self.delay.observe(seq, now);
+        match self.insert_one(seq, current, now) {
+            Insert::New | Insert::TooLate => self.delay.record(seq, now),
+            Insert::Duplicate | Insert::OutOfRange => {}
+        }
         if !previous.is_empty() && seq > 0 {
             let inserted = self.insert_one(seq - 1, previous, now);
             if inserted == Insert::New {
                 self.recovered += 1;
+                self.delay.record(seq - 1, now);
             }
         }
-        self.last_arrival = Some(now);
-    }
-
-    fn observe_arrival(&mut self, seq: u32, now: Instant) {
-        let Some(first) = self.first_arrival else {
-            self.first_arrival = Some(now);
-            return;
-        };
-        let expected_ms =
-            (seq.wrapping_sub(self.base_seq().unwrap_or(seq)) as f64) * FRAME_MS as f64;
-        let transit_ms = now.saturating_duration_since(first).as_secs_f64() * 1_000.0 - expected_ms;
-        if let (Some(prev_seq), Some(prev_transit)) = (self.last_jitter_seq, self.last_transit_ms)
-            && seq > prev_seq
-        {
-            let delta = (transit_ms - prev_transit).abs();
-            self.jitter_ms += (delta - self.jitter_ms) / 16.0;
+        if let Some(delay) = self.delay.quantile(DELAY_QUANTILE) {
+            self.target_ms = self.target_ms.max(desired_target(delay));
         }
-        self.last_jitter_seq = Some(seq);
-        self.last_transit_ms = Some(transit_ms);
-        self.base_target = desired_base_target(self.jitter_ms);
-        self.target_frames = self.target_frames.max(self.base_target);
-    }
-
-    fn base_seq(&self) -> Option<u32> {
-        self.packets.keys().next().copied()
+        self.last_arrival = Some(now);
     }
 
     fn insert_one(&mut self, seq: u32, payload: &[u8], now: Instant) -> Insert {
@@ -126,7 +190,7 @@ impl StreamBuffer {
             .playhead
             .is_some_and(|head| seq > head.saturating_add(120))
         {
-            return Insert::TooLate;
+            return Insert::OutOfRange;
         }
         self.packets.insert(seq, payload.to_vec());
         self.received += 1;
@@ -154,45 +218,86 @@ impl StreamBuffer {
         Insert::New
     }
 
+    fn target_frames(&self) -> usize {
+        (self.target_ms / FRAME_MS as f64).ceil() as usize
+    }
+
     fn can_start(&self, now: Instant) -> bool {
         let Some(first) = self.first_arrival else {
             return false;
         };
         let waited = now.saturating_duration_since(first);
         let buffered = self.packets.len();
-        buffered >= self.target_frames
-            || (buffered > 0 && waited >= FrameBudget::startup_grace(self.target_frames))
+        buffered >= self.target_frames()
+            || (buffered > 0 && waited >= FrameBudget::startup_grace(self.target_frames()))
+    }
+
+    // 野分過ぎ 古き便りは 読み飛ばす
+    fn resume(&mut self, now: Instant) {
+        let skip = self
+            .packets
+            .len()
+            .saturating_sub(self.target_frames().max(1));
+        self.playhead = self.packets.keys().nth(skip).copied();
+        if let Some(head) = self.playhead {
+            self.discard_before(head);
+        }
+        self.paused = false;
+        self.paused_since = None;
+        self.successive_concealments = 0;
+        self.clean_since = Some(now);
+    }
+
+    fn discard_before(&mut self, head: u32) {
+        while self
+            .packets
+            .first_key_value()
+            .is_some_and(|(&seq, _)| seq < head)
+        {
+            self.packets.pop_first();
+        }
+    }
+
+    // 秋の水 ゆるりと引きて 底を見す
+    fn settle_target(&mut self, now: Instant) {
+        let elapsed = self
+            .last_tick
+            .map(|at| now.saturating_duration_since(at))
+            .unwrap_or_default();
+        self.last_tick = Some(now);
+        let floor = self
+            .delay
+            .quantile(DELAY_QUANTILE)
+            .map_or(MIN_TARGET_MS, desired_target);
+        self.target_ms = (self.target_ms - TARGET_DECAY_MS_PER_S * elapsed.as_secs_f64())
+            .max(floor)
+            .min(MAX_TARGET_MS);
     }
 
     pub fn tick(&mut self, now: Instant) -> Option<PlayoutFrame> {
+        self.settle_target(now);
         if !self.started {
             if !self.can_start(now) {
                 return None;
             }
             self.started = true;
-            self.paused = false;
-            self.playhead = self.packets.keys().next().copied();
-            self.clean_since = Some(now);
+            self.resume(now);
         } else if self.paused {
             let paused_for = self
                 .paused_since
                 .map(|since| now.saturating_duration_since(since))
                 .unwrap_or_default();
-            let ready = self.packets.len() >= self.target_frames
+            let ready = self.packets.len() >= self.target_frames()
                 || (paused_for > Duration::from_millis(250) && !self.packets.is_empty());
-            if ready {
-                self.paused = false;
-                self.paused_since = None;
-                self.playhead = self.packets.keys().next().copied();
-                self.successive_concealments = 0;
-                self.clean_since = Some(now);
-            } else {
+            if !ready {
                 return None;
             }
+            self.resume(now);
         }
 
         let head = self.playhead?;
         self.trim_excess_latency(now);
+        let head = self.playhead.unwrap_or(head);
 
         let frame = if let Some(payload) = self.packets.remove(&head) {
             self.successive_concealments = 0;
@@ -205,22 +310,17 @@ impl StreamBuffer {
                 payload: Some(payload),
             }
         } else if self.stalled(now) {
-            self.paused = true;
-            self.paused_since = Some(now);
-            self.playhead = None;
+            self.pause(now);
             return None;
         } else {
             self.concealed += 1;
             self.played += 1;
             self.successive_concealments += 1;
             self.clean_since = None;
-            // A small gap is normal on Wi-Fi. A run of them means the buffer
-            // was too short; grow it before resuming.
-            self.target_frames = (self.target_frames + 2).min(MAX_TARGET_FRAMES);
+            // 虫食ひの 穴埋めるたび 器増す
+            self.target_ms = (self.target_ms + FRAME_MS as f64).min(MAX_TARGET_MS);
             if self.successive_concealments >= 3 {
-                self.paused = true;
-                self.paused_since = Some(now);
-                self.playhead = None;
+                self.pause(now);
                 return None;
             }
             PlayoutFrame {
@@ -230,8 +330,13 @@ impl StreamBuffer {
         };
 
         self.playhead = Some(head.wrapping_add(1));
-        self.relax_after_quiet(now);
         Some(frame)
+    }
+
+    fn pause(&mut self, now: Instant) {
+        self.paused = true;
+        self.paused_since = Some(now);
+        self.playhead = None;
     }
 
     fn stalled(&self, now: Instant) -> bool {
@@ -245,7 +350,7 @@ impl StreamBuffer {
         let Some(head) = self.playhead else {
             return;
         };
-        if self.packets.len() <= self.target_frames + 6 {
+        if self.pending_frames() <= self.target_frames() + 6 {
             return;
         }
         let can_trim = self
@@ -259,42 +364,32 @@ impl StreamBuffer {
         // one short splice is better than letting delay creep upward forever.
         if let Some(next) = self.packets.range(head..).map(|(seq, _)| *seq).nth(1) {
             self.playhead = Some(next);
+            self.discard_before(next);
             self.last_trim = Some(now);
         }
     }
 
-    fn relax_after_quiet(&mut self, now: Instant) {
-        let Some(clean) = self.clean_since else {
-            return;
-        };
-        if now.saturating_duration_since(clean) >= Duration::from_secs(4)
-            && self.target_frames > self.base_target
-            && self.successive_concealments == 0
-        {
-            self.target_frames -= 1;
-            self.clean_since = Some(now);
-        }
+    fn pending_frames(&self) -> usize {
+        self.playhead
+            .map(|head| self.packets.range(head..).count())
+            .unwrap_or(self.packets.len())
     }
 
     pub fn target_ms(&self) -> u32 {
-        self.target_frames as u32 * FRAME_MS
+        self.target_ms.round() as u32
     }
 
     pub fn buffered_ms(&self) -> u32 {
-        let pending = self
-            .playhead
-            .map(|head| self.packets.range(head..).count())
-            .unwrap_or(self.packets.len());
-        pending as u32 * FRAME_MS
+        self.pending_frames() as u32 * FRAME_MS
     }
 
     pub fn jitter_ms(&self) -> f64 {
-        self.jitter_ms
+        self.delay.jitter_ms
     }
 
     pub fn is_stable(&self) -> bool {
         self.successive_concealments == 0
-            && self.jitter_ms < 12.0
+            && self.delay.jitter_ms < 12.0
             && self
                 .clean_since
                 .map(|at| at.elapsed() > Duration::from_secs(3))
@@ -306,7 +401,7 @@ impl StreamBuffer {
             session,
             received: self.received,
             lost: self.concealed,
-            jitter_us: (self.jitter_ms * 1_000.0) as u64,
+            jitter_us: (self.delay.jitter_ms * 1_000.0) as u64,
             buffer_ms: self.buffered_ms(),
             concealment: self.concealed,
             stable: self.is_stable(),
@@ -321,7 +416,7 @@ impl StreamBuffer {
             played: self.played,
             buffered_ms: self.buffered_ms(),
             target_ms: self.target_ms(),
-            jitter_ms: self.jitter_ms,
+            jitter_ms: self.delay.jitter_ms,
             paused: self.paused,
             started: self.started,
         }
@@ -358,10 +453,8 @@ impl FrameBudget {
     }
 }
 
-fn desired_base_target(jitter_ms: f64) -> usize {
-    // Network jitter is a hint, not a verdict: cap the pre-roll it can buy at
-    // 60 ms. A real buffer shortfall raises the target further, with evidence.
-    ((jitter_ms / FRAME_MS as f64).ceil() as usize + 2).clamp(MIN_TARGET_FRAMES, 6)
+fn desired_target(delay_ms: f64) -> f64 {
+    (delay_ms + FRAME_MS as f64).clamp(MIN_TARGET_MS, MAX_TARGET_MS)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -482,17 +575,30 @@ mod tests {
         vec![byte; 40]
     }
 
+    fn at(t0: Instant, ms: u64) -> Instant {
+        t0 + Duration::from_millis(ms)
+    }
+
+    // 十ミリに 一つ届きて 一つ鳴る
+    fn steady(buffer: &mut StreamBuffer, t0: Instant, seqs: std::ops::Range<u32>) {
+        for seq in seqs {
+            let now = at(t0, seq as u64 * 10);
+            buffer.insert_pair(seq, &frame(seq as u8), &[], now);
+            let _ = buffer.tick(now);
+        }
+    }
+
     #[test]
     fn starts_after_target_and_preserves_order() {
         let t0 = Instant::now();
         let mut buffer = StreamBuffer::new(t0);
-        for seq in 0..3 {
+        for seq in 0..4 {
             buffer.insert_pair(seq, &frame(seq as u8), &[], t0);
         }
         let first = buffer.tick(t0).unwrap();
         assert_eq!(first.seq, 0);
         assert_eq!(first.payload.as_deref(), Some(frame(0).as_slice()));
-        for seq in 1..3 {
+        for seq in 1..4 {
             let next = buffer.tick(t0).unwrap();
             assert_eq!(next.seq, seq);
         }
@@ -518,12 +624,12 @@ mod tests {
     fn consecutive_gaps_pause_then_rebuffer() {
         let t0 = Instant::now();
         let mut buffer = StreamBuffer::new(t0);
-        for seq in 0..3 {
+        for seq in 0..4 {
             buffer.insert_pair(seq, &frame(seq as u8), &[], t0);
         }
-        let _ = buffer.tick(t0);
-        let _ = buffer.tick(t0);
-        let _ = buffer.tick(t0);
+        for _ in 0..4 {
+            assert!(buffer.tick(t0).unwrap().payload.is_some());
+        }
         // Nothing new arrives, but the stall timeout has not elapsed yet.
         let gap = buffer.tick(t0).unwrap();
         assert!(gap.payload.is_none());
@@ -531,13 +637,83 @@ mod tests {
         assert!(gap.payload.is_none());
         assert!(buffer.tick(t0).is_none());
         assert!(buffer.paused);
-        assert!(buffer.target_frames > MIN_TARGET_FRAMES);
+        assert!(buffer.target_ms > START_TARGET_MS);
 
-        let resumed = t0 + Duration::from_millis(300);
-        for seq in 3..8 {
+        let resumed = at(t0, 300);
+        for seq in 4..12 {
             buffer.insert_pair(seq, &frame(seq as u8), &[], resumed);
         }
         assert!(buffer.tick(resumed).is_some());
+    }
+
+    #[test]
+    fn a_steady_stream_measures_no_jitter() {
+        let t0 = Instant::now();
+        let mut buffer = StreamBuffer::new(t0);
+        steady(&mut buffer, t0, 0..1_000);
+        // 我が音を 波と見違ふ 古き耳
+        assert!(buffer.jitter_ms() < 0.5, "{}", buffer.jitter_ms());
+        assert_eq!(buffer.counters().concealed, 0);
+        assert_eq!(buffer.target_ms(), MIN_TARGET_MS as u32);
+    }
+
+    #[test]
+    fn delay_spikes_raise_the_target() {
+        let t0 = Instant::now();
+        let mut buffer = StreamBuffer::new(t0);
+        let mut arrivals = (0..600u32)
+            .map(|seq| {
+                let late = if seq % 10 == 5 { 45 } else { 0 };
+                (seq as u64 * 10 + late, seq)
+            })
+            .collect::<Vec<_>>();
+        arrivals.sort();
+        for (ms, seq) in arrivals {
+            buffer.insert_pair(seq, &frame(1), &[], at(t0, ms));
+            let _ = buffer.tick(at(t0, ms));
+        }
+        assert!(buffer.target_ms() >= 55, "{}", buffer.target_ms());
+        assert!(buffer.jitter_ms() > 1.0);
+    }
+
+    #[test]
+    fn resuming_after_a_stall_skips_stale_audio() {
+        let t0 = Instant::now();
+        let mut buffer = StreamBuffer::new(t0);
+        steady(&mut buffer, t0, 0..100);
+        for tick in 100..140 {
+            let _ = buffer.tick(at(t0, tick * 10));
+        }
+        assert!(buffer.paused);
+        // 堰切れて 溜まりし文が 一度に来
+        let burst = at(t0, 1_400);
+        for seq in 100..140 {
+            buffer.insert_pair(seq, &frame(1), &frame(1), burst);
+        }
+        let first = buffer.tick(burst).unwrap();
+        let behind_ms = (140 - first.seq) * FRAME_MS;
+        assert!(
+            behind_ms <= buffer.target_ms() + FRAME_MS,
+            "{behind_ms} ms behind"
+        );
+    }
+
+    #[test]
+    fn excess_latency_is_trimmed() {
+        let t0 = Instant::now();
+        let mut buffer = StreamBuffer::new(t0);
+        steady(&mut buffer, t0, 0..50);
+        // 秋時雨 二十の文の 列をなす
+        for seq in 50..70 {
+            buffer.insert_pair(seq, &frame(1), &[], at(t0, 500));
+        }
+        for seq in 70..470 {
+            let now = at(t0, (seq - 20) as u64 * 10);
+            buffer.insert_pair(seq, &frame(1), &[], now);
+            let _ = buffer.tick(now);
+        }
+        let ceiling = buffer.target_ms() + 7 * FRAME_MS;
+        assert!(buffer.buffered_ms() <= ceiling, "{}", buffer.buffered_ms());
     }
 
     #[test]
@@ -571,22 +747,5 @@ mod tests {
         }
         assert_eq!(state.bitrate_kbps, 160);
         assert_eq!(state.tier, QualityTier::Studio);
-    }
-
-    #[test]
-    fn latency_target_follows_jitter() {
-        let t0 = Instant::now();
-        let mut buffer = StreamBuffer::new(t0);
-        for seq in 0..6 {
-            // Push arrivals around so the jitter estimator sees variation.
-            let at = if seq % 2 == 0 {
-                t0 + Duration::from_millis(seq as u64 * 10)
-            } else {
-                t0 + Duration::from_millis(seq as u64 * 10 + 35)
-            };
-            buffer.insert_pair(seq, &frame(seq as u8), &[], at);
-        }
-        assert!(buffer.jitter_ms() > 0.0);
-        assert!(buffer.target_ms() >= 30);
     }
 }
