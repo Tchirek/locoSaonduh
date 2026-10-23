@@ -335,7 +335,7 @@ mod macos_impl {
     }
 
     fn key(name: &'static CStr) -> CFRetained<CFString> {
-        CFString::from_str(name.to_str().unwrap_or_default())
+        CFString::from_str(name.to_str().expect("Core Audio keys are ASCII"))
     }
 
     fn aggregate_properties(tap_uid: &NSString, uid: &str, name: &str) -> CFRetained<CFDictionary> {
