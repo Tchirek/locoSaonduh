@@ -112,7 +112,6 @@
     <div class="identity-copy">
       <h1>{snapshot.identity.alias}</h1>
       <p class="mono">
-        <span class="live-dot" class:idle={!snapshot.network.ip}></span>
         {snapshot.network.ip ? `${snapshot.network.ip}:${snapshot.network.port}` : "未连接网络"}
       </p>
     </div>
@@ -244,9 +243,6 @@
   }
 
   .identity p {
-    display: flex;
-    align-items: center;
-    gap: 7px;
     margin-top: 3px;
     color: var(--ink-3);
     font-size: 12px;

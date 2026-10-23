@@ -223,7 +223,7 @@
   </div>
 
   {#if toast}
-    <div class="toast {toast.level}" role="status" aria-live="polite">
+    <div class="toast" role={toast.level === "error" ? "alert" : "status"}>
       {toast.message}
     </div>
   {/if}
@@ -312,11 +312,6 @@
     line-height: 1.5;
     transform: translateX(-50%);
     animation: toast-in 160ms ease-out both;
-  }
-
-  .toast.error,
-  .toast.warning {
-    box-shadow: inset 3px 0 0 var(--accent);
   }
 
   @keyframes toast-in {
