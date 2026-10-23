@@ -989,6 +989,14 @@ impl Coordinator {
         self.publish();
     }
 
+    fn playback_device(&self) -> Option<String> {
+        self.settings.output_id.clone().or_else(|| {
+            self.broadcasts
+                .iter()
+                .find_map(|runtime| runtime.capture.as_ref()?.playback_override())
+        })
+    }
+
     fn ensure_receiver(&mut self) -> Result<(), String> {
         if self.receiver.is_some() {
             return Ok(());
@@ -1000,7 +1008,7 @@ impl Coordinator {
             peak,
             underrun_samples,
             error,
-        } = PlaybackSink::open(self.settings.output_id.as_deref())
+        } = PlaybackSink::open(self.playback_device().as_deref())
             .map_err(|error| format!("输出设备无法打开：{error}，请在设置中更换"))?;
         let streams = Arc::new(Mutex::new(HashMap::new()));
         let virtual_out: Outlet = Arc::new(Mutex::new(None));

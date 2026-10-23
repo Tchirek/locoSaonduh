@@ -29,18 +29,6 @@ pub fn is_private_sink(_device_id: &str) -> bool {
     false
 }
 
-/// 秋の舟 元の岸へと 声返す
-pub fn default_playback_id() -> Option<String> {
-    #[cfg(target_os = "linux")]
-    {
-        linux_impl::original_sink()
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        None
-    }
-}
-
 #[cfg(target_os = "windows")]
 mod windows_impl {
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -423,19 +411,11 @@ mod macos_impl {
 
 #[cfg(target_os = "linux")]
 mod linux_impl {
-    use std::sync::Mutex;
-
     use anyhow::{Result, anyhow};
     use cpal::traits::HostTrait;
 
     use crate::audio::device::{AudioSource, CaptureGuard, OpenCapture, open_device_capture};
     use crate::audio::pulse::{self, SYSTEM_SINK, pactl};
-
-    static ORIGINAL_SINK: Mutex<Option<String>> = Mutex::new(None);
-
-    pub fn original_sink() -> Option<String> {
-        ORIGINAL_SINK.lock().ok()?.as_deref().map(pulse::device_id)
-    }
 
     /// 迷ひ子の 帯ほどきやる 夜寒かな
     pub fn cleanup_stale() {
@@ -503,25 +483,28 @@ mod linux_impl {
                 stream: None,
                 null_module,
                 loopback_module,
-                original: original.clone(),
+                original,
             };
             pactl(&["set-default-sink", SYSTEM_SINK])?;
             for input in pulse::sink_inputs()? {
                 let owned = input.owner_module.as_deref() == Some(&takeover.loopback_module);
-                if input.ours || owned || input.sink != original {
+                if input.ours || owned || input.sink != takeover.original {
                     continue;
                 }
                 let _ = pactl(&["move-sink-input", &input.index, SYSTEM_SINK]);
             }
-            *ORIGINAL_SINK.lock().unwrap() = Some(original);
             Ok(takeover)
+        }
+
+        /// 秋の舟 元の岸へと 声返す
+        pub fn original_output(&self) -> String {
+            pulse::device_id(&self.original)
         }
     }
 
     impl Drop for Takeover {
         fn drop(&mut self) {
             drop(self.stream.take());
-            *ORIGINAL_SINK.lock().unwrap() = None;
             let _ = pactl(&["set-default-sink", &self.original]);
             pulse::move_inputs(SYSTEM_SINK, &self.original);
             pulse::unload(&self.loopback_module);

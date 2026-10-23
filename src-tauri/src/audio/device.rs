@@ -140,6 +140,16 @@ pub enum CaptureGuard {
     Takeover(system::Takeover),
 }
 
+impl CaptureGuard {
+    pub fn playback_override(&self) -> Option<String> {
+        #[cfg(target_os = "linux")]
+        if let Self::Takeover(takeover) = self {
+            return Some(takeover.original_output());
+        }
+        None
+    }
+}
+
 pub struct OpenCapture {
     pub guard: CaptureGuard,
     pub feed: rtrb::Consumer<f32>,
