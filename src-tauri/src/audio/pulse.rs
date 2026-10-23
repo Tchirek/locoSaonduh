@@ -85,21 +85,21 @@ pub struct SinkInput {
 }
 
 pub fn sink_inputs() -> Result<Vec<SinkInput>> {
-    let pid = std::process::id().to_string();
-    let marker = format!("cpal-pulseaudio-{pid}");
-    let sinks = sinks()?;
+    let listing = pactl(&["list", "sink-inputs"])?;
+    Ok(parse_sink_inputs(&listing, &sinks()?, std::process::id()))
+}
+
+fn parse_sink_inputs(listing: &str, sinks: &[(String, String)], pid: u32) -> Vec<SinkInput> {
+    let pid = format!("\"{pid}\"");
     let mut inputs = Vec::new();
-    for block in pactl(&["list", "sink-inputs"])?
-        .split("Sink Input #")
-        .skip(1)
-    {
+    for block in listing.split("Sink Input #").skip(1) {
         let mut lines = block.lines();
         let Some(index) = lines.next().map(|line| line.trim().to_owned()) else {
             continue;
         };
         let mut sink = String::new();
         let mut owner_module = None;
-        let mut ours = block.contains(&marker);
+        let mut ours = false;
         for line in lines {
             let line = line.trim();
             if let Some(value) = line.strip_prefix("Sink: ") {
@@ -111,7 +111,7 @@ pub fn sink_inputs() -> Result<Vec<SinkInput>> {
             } else if let Some(value) = line.strip_prefix("Owner Module: ") {
                 owner_module = Some(value.to_owned());
             } else if let Some(value) = line.strip_prefix("application.process.id = ") {
-                ours |= value.trim_matches('"') == pid;
+                ours = value == pid;
             }
         }
         inputs.push(SinkInput {
@@ -121,7 +121,7 @@ pub fn sink_inputs() -> Result<Vec<SinkInput>> {
             ours,
         });
     }
-    Ok(inputs)
+    inputs
 }
 
 pub fn move_inputs(from: &str, to: &str) {
@@ -129,5 +129,56 @@ pub fn move_inputs(from: &str, to: &str) {
         for input in inputs.iter().filter(|input| input.sink == from) {
             let _ = pactl(&["move-sink-input", &input.index, to]);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const LISTING: &str = "Sink Input #42
+\tDriver: protocol-native.c
+\tOwner Module: 10
+\tClient: 77
+\tSink: 1
+\tProperties:
+\t\tapplication.name = \"cpal-pulseaudio-9999\"
+\t\tapplication.process.id = \"1234\"
+
+Sink Input #43
+\tDriver: protocol-native.c
+\tOwner Module: 10
+\tClient: 78
+\tSink: 1
+\tProperties:
+\t\tapplication.name = \"Firefox\"
+\t\tapplication.process.id = \"12345\"
+
+Sink Input #44
+\tDriver: module-loopback.c
+\tOwner Module: 25
+\tClient: n/a
+\tSink: 0
+\tProperties:
+\t\tmedia.name = \"Loopback\"
+";
+
+    #[test]
+    fn sink_inputs_are_matched_by_process_id_alone() {
+        let sinks = vec![
+            ("0".to_owned(), "alsa_output.speakers".to_owned()),
+            ("1".to_owned(), SYSTEM_SINK.to_owned()),
+        ];
+        let inputs = parse_sink_inputs(LISTING, &sinks, 1234);
+        assert_eq!(inputs.len(), 3);
+        assert!(inputs[0].ours, "the process id identifies this app");
+        assert!(
+            !inputs[1].ours,
+            "a longer id with the same prefix is someone else"
+        );
+        assert!(!inputs[2].ours);
+        assert_eq!(inputs[0].sink, SYSTEM_SINK);
+        assert_eq!(inputs[2].sink, "alsa_output.speakers");
+        assert_eq!(inputs[2].owner_module.as_deref(), Some("25"));
     }
 }
