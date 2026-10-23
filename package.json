@@ -1,7 +1,7 @@
 {
   "name": "locosaonduh",
   "private": true,
-  "version": "0.1.2",
+  "version": "0.2.0",
   "description": "Low-latency LAN audio, mixed into one speaker",
   "license": "MIT",
   "repository": "https://github.com/Tchirek/locoSaonduh",

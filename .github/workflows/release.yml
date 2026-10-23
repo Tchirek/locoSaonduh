@@ -97,10 +97,16 @@ jobs:
             These builds are unsigned. Windows SmartScreen and macOS Gatekeeper
             may ask you to confirm before opening them.
 
-            System-output loopback capture is fully supported on Windows. On
-            macOS it depends on the CoreAudio version and Screen Recording
-            permission; on Linux, choose a monitor / loopback input for system
-            audio. Receiving is available on all three platforms.
+            System sound is captured without this app's own playback, so two
+            devices can play each other at once: Windows 10 (2004+) and 11,
+            macOS 14.2+ (asks for audio recording permission), and Linux with
+            PulseAudio or PipeWire (`pactl`). Older systems fall back to plain
+            loopback. The app can broadcast system sound and a microphone
+            together, stay in the tray, and start with the computer.
+
+            The optional virtual microphone uses VB-CABLE by VB-Audio
+            (donationware, https://vb-audio.com/Cable/) on Windows and macOS,
+            and a PulseAudio null sink on Linux.
 
             Audio is sent over UDP port 53410 and is not encrypted. Use this on
             a trusted local network.
