@@ -181,7 +181,12 @@ mod tests {
     }
 
     fn left(interleaved: &[f32]) -> Vec<f32> {
-        interleaved.chunks_exact(2).map(|frame| frame[0]).collect()
+        interleaved
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|frame| frame[0])
+            .collect()
     }
 
     #[test]
