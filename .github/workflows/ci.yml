@@ -50,3 +50,54 @@ jobs:
       - name: Check desktop binary
         working-directory: src-tauri
         run: cargo check --bin locosaonduh
+
+  unix:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-22.04]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Install Linux system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libasound2-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libssl-dev \
+            libwebkit2gtk-4.1-dev \
+            libxdo-dev
+
+      - name: Build UI
+        run: |
+          npm ci
+          npm run build
+
+      - name: Lint
+        working-directory: src-tauri
+        run: cargo clippy --lib --tests -- -D warnings
+
+      - name: Test core
+        working-directory: src-tauri
+        run: cargo test --lib
+
+      - name: Check desktop binary
+        working-directory: src-tauri
+        run: cargo check --bin locosaonduh

@@ -11,28 +11,33 @@
     probeNetwork,
     probeAddress,
     setAlias,
+    setMic,
     setOutput,
-    setSource,
-    startBroadcast,
-    stopBroadcast,
+    setPrefs,
+    setVirtualMic,
+    startStream,
+    stopStream,
     subscribe,
     unsubscribe,
     refreshAudio,
   } from "./lib/bridge";
-  import type { Notice, Snapshot, Tab } from "./lib/types";
+  import type { Kind, Notice, Snapshot, Tab } from "./lib/types";
 
   let snapshot = $state<Snapshot | null>(null);
   let fatal = $state<string | null>(null);
   let tab = $state<Tab>("receive");
-  let starting = $state(false);
-  let stopping = $state(false);
+  let busyKinds = $state<Kind[]>([]);
   let scanning = $state(false);
   let refreshing = $state(false);
-  let connectingId = $state<string | null>(null);
+  let connecting = $state<string | null>(null);
   let toast = $state<Notice | null>(null);
   let toastTimer: ReturnType<typeof setTimeout> | undefined;
   let lastNoticeMessage = "";
   let scrollEl = $state<HTMLElement>();
+
+  let liveListening = $derived(
+    snapshot?.listening.filter((stream) => stream.state !== "standby").length ?? 0,
+  );
 
   onMount(() => {
     let cancelled = false;
@@ -105,22 +110,16 @@
     }
   }
 
-  async function handleStart(sourceId: string) {
-    starting = true;
-    await attempt(() => startBroadcast(sourceId));
-    starting = false;
+  async function handleToggle(kind: Kind, on: boolean) {
+    busyKinds = [...busyKinds, kind];
+    await attempt(() => (on ? startStream(kind) : stopStream(kind)));
+    busyKinds = busyKinds.filter((item) => item !== kind);
   }
 
-  async function handleStop() {
-    stopping = true;
-    await attempt(stopBroadcast);
-    stopping = false;
-  }
-
-  async function handleSubscribe(peerId: string) {
-    connectingId = peerId;
-    await attempt(() => subscribe(peerId));
-    connectingId = null;
+  async function handleSubscribe(key: string) {
+    connecting = key;
+    await attempt(() => subscribe(key));
+    connecting = null;
   }
 
   async function handleScan() {
@@ -163,8 +162,8 @@
   <div class="shell">
     <Sidebar
       {tab}
-      listening={snapshot.listening.length}
-      live={Boolean(snapshot.broadcast)}
+      listening={liveListening}
+      live={snapshot.broadcasts.length > 0}
       onTab={changeTab}
     />
 
@@ -174,10 +173,10 @@
           {#if tab === "receive"}
             <ReceiveView
               {snapshot}
-              {connectingId}
+              {connecting}
               {scanning}
               onSubscribe={handleSubscribe}
-              onUnsubscribe={(senderId) => attempt(() => unsubscribe(senderId))}
+              onUnsubscribe={(key) => attempt(() => unsubscribe(key))}
               onScan={handleScan}
               onProbe={(address) => attempt(() => probeAddress(address))}
               onSettings={() => changeTab("settings")}
@@ -185,15 +184,11 @@
           {:else if tab === "send"}
             <SendView
               {snapshot}
-              {starting}
-              {stopping}
+              busy={busyKinds}
               {scanning}
-              {refreshing}
-              onStart={handleStart}
-              onStop={handleStop}
-              onSourceChange={(sourceId) => attempt(() => setSource(sourceId))}
+              onToggle={handleToggle}
+              onMicChange={(sourceId) => attempt(() => setMic(sourceId))}
               onScan={handleScan}
-              onRefresh={handleRefresh}
             />
           {:else}
             <SettingsView
@@ -201,7 +196,10 @@
               {refreshing}
               onSetAlias={(alias) => attempt(() => setAlias(alias))}
               onSetOutput={(outputId) => attempt(() => setOutput(outputId))}
+              onSetPrefs={(prefs) => attempt(() => setPrefs(prefs))}
+              onSetVirtualMic={(enabled) => attempt(() => setVirtualMic(enabled))}
               onRefresh={handleRefresh}
+              onError={(message) => showToast(message)}
             />
           {/if}
         </div>

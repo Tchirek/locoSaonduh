@@ -33,7 +33,8 @@ pub struct PlaybackSink {
 impl PlaybackSink {
     pub fn open(device_id: Option<&str>) -> Result<Self> {
         let host = cpal::default_host();
-        let device = match device_id {
+        let fallback = super::system::default_playback_id();
+        let device = match device_id.or(fallback.as_deref()) {
             Some(id) => {
                 let parsed = id
                     .parse::<cpal::DeviceId>()

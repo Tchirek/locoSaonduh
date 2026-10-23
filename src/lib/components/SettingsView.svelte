@@ -1,35 +1,63 @@
 <script lang="ts">
-  import { untrack } from "svelte";
-  import { Check, ChevronDown, RefreshCw } from "@lucide/svelte";
-  import type { Snapshot } from "../types";
+  import { onMount, untrack } from "svelte";
+  import { Check, ChevronDown, ExternalLink, RefreshCw } from "@lucide/svelte";
+  import { autostartStatus, openVendorPage, setAutostart } from "../bridge";
+  import type { Prefs, Snapshot } from "../types";
+  import Switch from "./Switch.svelte";
 
   let {
     snapshot,
     refreshing = false,
     onSetAlias,
     onSetOutput,
+    onSetPrefs,
+    onSetVirtualMic,
     onRefresh,
+    onError,
   }: {
     snapshot: Snapshot;
     refreshing?: boolean;
     onSetAlias: (alias: string) => Promise<boolean>;
     onSetOutput: (outputId: string | null) => void;
+    onSetPrefs: (prefs: Partial<Prefs>) => void;
+    onSetVirtualMic: (enabled: boolean) => void;
     onRefresh: () => void;
+    onError: (message: string) => void;
   } = $props();
 
   let alias = $state(untrack(() => snapshot.identity.alias));
   let savingAlias = $state(false);
+  let autostart = $state<boolean | null>(null);
 
   let aliasDirty = $derived(alias.trim() !== snapshot.identity.alias);
   let outputBusy = $derived(
     snapshot.listening.length > 0 || snapshot.pending.length > 0,
   );
+  let virtual = $derived(snapshot.virtualMic);
+  let virtualBusy = $derived(virtual.enabled && virtual.state === "installing");
+
+  onMount(() => {
+    autostartStatus()
+      .then((enabled) => (autostart = enabled))
+      .catch(() => (autostart = false));
+  });
 
   async function saveAlias() {
     if (savingAlias || !aliasDirty) return;
     savingAlias = true;
     if (await onSetAlias(alias)) alias = alias.trim();
     savingAlias = false;
+  }
+
+  async function toggleAutostart(next: boolean) {
+    const previous = autostart;
+    autostart = next;
+    try {
+      await setAutostart(next);
+    } catch (error) {
+      autostart = previous;
+      onError(String(error));
+    }
   }
 </script>
 
@@ -102,6 +130,73 @@
           <ChevronDown size={15} strokeWidth={1.7} />
         </span>
       </div>
+      {#if virtual.supported}
+        <div class="setting">
+          <span class="setting-label">
+            虚拟麦克风
+            <small>
+              {#if virtual.state === "installing" && virtual.enabled}
+                正在安装 {virtual.provider}…
+              {:else if virtual.state === "restart"}
+                重启后生效
+              {:else if virtual.enabled && virtual.device}
+                → {virtual.device}
+              {:else if virtual.link}
+                <button type="button" class="vendor" onclick={openVendorPage}>
+                  {virtual.provider} · VB-Audio 捐赠软件<ExternalLink size={11} />
+                </button>
+              {:else}
+                {virtual.provider}
+              {/if}
+            </small>
+          </span>
+          <span class="setting-switch">
+            <Switch
+              label="虚拟麦克风"
+              checked={virtual.enabled}
+              busy={virtualBusy}
+              onchange={onSetVirtualMic}
+            />
+          </span>
+        </div>
+      {/if}
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="section-head"><h2>后台</h2></div>
+    <div class="card group">
+      <div class="setting">
+        <span class="setting-label">开机自启</span>
+        <span class="setting-switch">
+          <Switch
+            label="开机自启"
+            checked={autostart ?? false}
+            disabled={autostart === null}
+            onchange={toggleAutostart}
+          />
+        </span>
+      </div>
+      <div class="setting">
+        <span class="setting-label">启动时恢复收放</span>
+        <span class="setting-switch">
+          <Switch
+            label="启动时恢复收放"
+            checked={snapshot.prefs.restore}
+            onchange={(restore) => onSetPrefs({ restore })}
+          />
+        </span>
+      </div>
+      <div class="setting">
+        <span class="setting-label">关闭窗口后常驻托盘</span>
+        <span class="setting-switch">
+          <Switch
+            label="关闭窗口后常驻托盘"
+            checked={snapshot.prefs.background}
+            onchange={(background) => onSetPrefs({ background })}
+          />
+        </span>
+      </div>
     </div>
   </section>
 
@@ -142,7 +237,7 @@
 
   .setting-label {
     display: flex;
-    flex: none;
+    min-width: 0;
     flex-direction: column;
     gap: 2px;
     font-size: 13px;
@@ -150,17 +245,38 @@
   }
 
   .setting-label small {
+    overflow: hidden;
     color: var(--ink-3);
     font-size: 11px;
     font-weight: 400;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .setting-control {
     display: flex;
     width: min(260px, 60%);
+    flex: none;
     align-items: center;
     gap: 4px;
     margin-left: auto;
+  }
+
+  .setting-switch {
+    display: flex;
+    margin-left: auto;
+  }
+
+  .vendor {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    color: inherit;
+    font-size: inherit;
+  }
+
+  .vendor:hover {
+    color: var(--accent);
   }
 
   .save {

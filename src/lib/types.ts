@@ -1,15 +1,19 @@
+export type Kind = "system" | "microphone";
+
 export interface Snapshot {
   revision: number;
   identity: Identity;
   network: Network;
   peers: Peer[];
-  broadcast: OwnBroadcast | null;
+  broadcasts: OwnBroadcast[];
   listening: ListeningStream[];
   pending: string[];
   sources: AudioSource[];
   outputs: OutputDevice[];
-  selectedSource: string | null;
+  selectedMic: string | null;
   selectedOutput: string | null;
+  virtualMic: VirtualMic;
+  prefs: Prefs;
   notice: Notice | null;
 }
 
@@ -34,15 +38,14 @@ export interface Peer {
   platform: string;
   address: string;
   ageMs: number;
-  isBroadcasting: boolean;
-  broadcast: PeerBroadcast | null;
+  streams: PeerStream[];
   isListening: boolean;
 }
 
-export interface PeerBroadcast {
+export interface PeerStream {
   session: number;
   source: string;
-  sourceKind: string;
+  sourceKind: Kind;
   startedAtMs: number;
   listeners: number;
   codec: Codec;
@@ -50,13 +53,14 @@ export interface PeerBroadcast {
 
 export interface OwnBroadcast {
   session: number;
+  kind: Kind;
   source: string;
-  sourceKind: string;
   startedAtMs: number;
   listeners: Listener[];
   quality: SendQuality;
   level: number;
   packetsSent: number;
+  excludesSelf: boolean;
 }
 
 export interface Listener {
@@ -80,10 +84,11 @@ export interface SendQuality {
 }
 
 export interface ListeningStream {
+  key: string;
   senderId: string;
   senderAlias: string;
+  kind: Kind;
   source: string;
-  sourceKind: string;
   state: "buffering" | "live" | "waiting" | "standby";
   bitrateKbps: number;
   bufferMs: number;
@@ -92,13 +97,13 @@ export interface ListeningStream {
   lossPct: number;
   level: number;
   output: string;
-  outputPrebufferMs: number;
+  toVirtual: boolean;
 }
 
 export interface AudioSource {
   id: string;
   name: string;
-  kind: "system" | "microphone";
+  kind: Kind;
   detail: string;
   isDefault: boolean;
 }
@@ -109,6 +114,20 @@ export interface OutputDevice {
   isDefault: boolean;
   sampleRate: number;
   channels: number;
+}
+
+export interface VirtualMic {
+  supported: boolean;
+  enabled: boolean;
+  state: "missing" | "installing" | "ready" | "restart" | "failed";
+  device: string | null;
+  provider: string;
+  link: string;
+}
+
+export interface Prefs {
+  restore: boolean;
+  background: boolean;
 }
 
 export interface Codec {
@@ -124,3 +143,5 @@ export interface Notice {
 }
 
 export type Tab = "receive" | "send" | "settings";
+
+export const streamKey = (peerId: string, kind: Kind) => `${peerId}#${kind}`;

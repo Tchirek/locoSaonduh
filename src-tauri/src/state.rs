@@ -10,13 +10,15 @@ pub struct Snapshot {
     pub identity: IdentityView,
     pub network: NetworkView,
     pub peers: Vec<PeerView>,
-    pub broadcast: Option<BroadcastOwnView>,
+    pub broadcasts: Vec<BroadcastOwnView>,
     pub listening: Vec<ListeningView>,
     pub pending: Vec<String>,
     pub sources: Vec<AudioSource>,
     pub outputs: Vec<OutputDevice>,
-    pub selected_source: Option<String>,
+    pub selected_mic: Option<String>,
     pub selected_output: Option<String>,
+    pub virtual_mic: VirtualMicView,
+    pub prefs: PrefsView,
     pub notice: Option<NoticeView>,
 }
 
@@ -38,6 +40,24 @@ pub struct NetworkView {
     pub discovery: String,
 }
 
+#[derive(Debug, Clone, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct VirtualMicView {
+    pub supported: bool,
+    pub enabled: bool,
+    pub state: String,
+    pub device: Option<String>,
+    pub provider: String,
+    pub link: String,
+}
+
+#[derive(Debug, Clone, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct PrefsView {
+    pub restore: bool,
+    pub background: bool,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PeerView {
@@ -47,8 +67,7 @@ pub struct PeerView {
     pub platform: String,
     pub address: String,
     pub age_ms: u64,
-    pub is_broadcasting: bool,
-    pub broadcast: Option<BroadcastView>,
+    pub streams: Vec<BroadcastView>,
     pub is_listening: bool,
 }
 
@@ -64,11 +83,11 @@ pub struct BroadcastView {
 }
 
 impl BroadcastView {
-    pub fn from_announce(announce: &BroadcastAnnounce, source_kind: &str) -> Self {
+    pub fn from_announce(announce: &BroadcastAnnounce) -> Self {
         Self {
             session: announce.session,
             source: announce.source.clone(),
-            source_kind: source_kind.to_owned(),
+            source_kind: announce.source_kind.clone(),
             started_at_ms: announce.started_at_ms,
             listeners: announce.listeners,
             codec: announce.codec.clone(),
@@ -80,13 +99,14 @@ impl BroadcastView {
 #[serde(rename_all = "camelCase")]
 pub struct BroadcastOwnView {
     pub session: u32,
+    pub kind: String,
     pub source: String,
-    pub source_kind: String,
     pub started_at_ms: u64,
     pub listeners: Vec<ListenerView>,
     pub quality: SendQualityView,
     pub level: f32,
     pub packets_sent: u64,
+    pub excludes_self: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -116,10 +136,11 @@ pub struct SendQualityView {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ListeningView {
+    pub key: String,
     pub sender_id: String,
     pub sender_alias: String,
+    pub kind: String,
     pub source: String,
-    pub source_kind: String,
     pub state: String,
     pub bitrate_kbps: u32,
     pub buffer_ms: u32,
@@ -128,7 +149,7 @@ pub struct ListeningView {
     pub loss_pct: f64,
     pub level: f32,
     pub output: String,
-    pub output_prebuffer_ms: u32,
+    pub to_virtual: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]

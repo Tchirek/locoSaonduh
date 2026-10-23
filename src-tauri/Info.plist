@@ -6,5 +6,7 @@
   <string>locoSaonduh finds and streams audio to devices on your local network.</string>
   <key>NSMicrophoneUsageDescription</key>
   <string>locoSaonduh can broadcast your microphone as an optional audio source.</string>
+  <key>NSAudioCaptureUsageDescription</key>
+  <string>locoSaonduh broadcasts the sound this Mac plays, leaving out its own playback.</string>
 </dict>
 </plist>

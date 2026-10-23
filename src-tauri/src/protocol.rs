@@ -201,6 +201,9 @@ pub struct Announce {
     pub platform: String,
     pub port: u16,
     pub broadcast: Option<BroadcastAnnounce>,
+    /// 新しき 枝は古木に 知られずに
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub streams: Vec<BroadcastAnnounce>,
 }
 
 impl Announce {
@@ -222,7 +225,18 @@ impl Announce {
             platform: platform.into(),
             port: DEFAULT_PORT,
             broadcast,
+            streams: Vec::new(),
         }
+    }
+
+    pub fn with_streams(mut self, streams: Vec<BroadcastAnnounce>) -> Self {
+        self.broadcast = streams
+            .iter()
+            .find(|stream| stream.source_kind == "system")
+            .or_else(|| streams.first())
+            .cloned();
+        self.streams = streams;
+        self
     }
 
     pub fn is_compatible(&self) -> bool {
@@ -267,6 +281,8 @@ pub struct Subscribe {
     pub id: String,
     pub alias: String,
     pub platform: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -304,12 +320,17 @@ pub struct Peer {
     pub address: SocketAddr,
     pub port: u16,
     pub hostname: String,
-    pub broadcast: Option<BroadcastAnnounce>,
+    pub streams: Vec<BroadcastAnnounce>,
     pub last_seen: std::time::Instant,
 }
 
 impl Peer {
     pub fn from_announce(announce: &Announce, address: SocketAddr) -> Self {
+        let streams = if announce.streams.is_empty() {
+            announce.broadcast.clone().into_iter().collect()
+        } else {
+            announce.streams.clone()
+        };
         Self {
             id: announce.id.clone(),
             alias: announce.alias.clone(),
@@ -317,9 +338,19 @@ impl Peer {
             address,
             port: announce.port,
             hostname: announce.hostname.clone(),
-            broadcast: announce.broadcast.clone(),
+            streams,
             last_seen: std::time::Instant::now(),
         }
+    }
+
+    pub fn stream(&self, kind: &str) -> Option<&BroadcastAnnounce> {
+        self.streams
+            .iter()
+            .find(|stream| stream.source_kind == kind)
+    }
+
+    pub fn primary(&self) -> Option<&BroadcastAnnounce> {
+        self.stream("system").or_else(|| self.streams.first())
     }
 }
 
@@ -365,6 +396,56 @@ mod tests {
         let probe: Control =
             serde_json::from_str(r#"{"type":"probe","data":{"id":"old"}}"#).unwrap();
         assert!(matches!(probe, Control::Probe { announce: None, .. }));
+    }
+
+    fn stream(session: u32, kind: &str) -> BroadcastAnnounce {
+        BroadcastAnnounce {
+            session,
+            source: kind.to_owned(),
+            source_kind: kind.to_owned(),
+            started_at_ms: 1,
+            listeners: 0,
+            codec: CodecAnnounce::default(),
+        }
+    }
+
+    #[test]
+    fn two_streams_stay_readable_to_a_one_stream_peer() {
+        let announce = Announce::new("a", "A", "windows", None)
+            .with_streams(vec![stream(7, "microphone"), stream(9, "system")]);
+        let json = serde_json::to_string(&Control::Announce(announce)).unwrap();
+        let old: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(old["data"]["broadcast"]["session"], 9);
+        let Control::Announce(decoded) = serde_json::from_str::<Control>(&json).unwrap() else {
+            panic!("announce expected");
+        };
+        let peer = Peer::from_announce(&decoded, "10.0.0.2:53410".parse().unwrap());
+        assert_eq!(peer.streams.len(), 2);
+        assert_eq!(peer.stream("microphone").unwrap().session, 7);
+        assert_eq!(peer.primary().unwrap().session, 9);
+    }
+
+    #[test]
+    fn a_one_stream_announce_becomes_a_single_stream() {
+        let json = r#"{"type":"announce","data":{"app":"locoSaonduh","version":1,"id":"old","alias":"Old","hostname":"old","platform":"linux","port":53410,"broadcast":{"session":3,"source":"x","sourceKind":"system","startedAtMs":1,"listeners":0,"codec":{"name":"opus","sampleRate":48000,"channels":2,"frameMs":10}}}}"#;
+        let Control::Announce(decoded) = serde_json::from_str::<Control>(json).unwrap() else {
+            panic!("announce expected");
+        };
+        let peer = Peer::from_announce(&decoded, "10.0.0.3:53410".parse().unwrap());
+        assert_eq!(peer.streams.len(), 1);
+        assert_eq!(peer.primary().unwrap().session, 3);
+    }
+
+    #[test]
+    fn a_subscribe_without_session_still_parses() {
+        let control: Control = serde_json::from_str(
+            r#"{"type":"subscribe","data":{"id":"x","alias":"X","platform":"linux"}}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            control,
+            Control::Subscribe(Subscribe { session: None, .. })
+        ));
     }
 
     #[test]

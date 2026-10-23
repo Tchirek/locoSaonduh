@@ -1,13 +1,14 @@
 <script lang="ts">
-  import { Play, Plus, RefreshCw, Volume2 } from "@lucide/svelte";
-  import type { ListeningStream, Peer, Snapshot } from "../types";
+  import { Mic, Plus, RefreshCw, Volume2 } from "@lucide/svelte";
+  import { streamKey } from "../types";
+  import type { Kind, ListeningStream, Snapshot } from "../types";
   import DeviceIcon from "./DeviceIcon.svelte";
   import LevelMeter from "./LevelMeter.svelte";
   import Mark from "./Mark.svelte";
 
   let {
     snapshot,
-    connectingId = null,
+    connecting = null,
     scanning = false,
     onSubscribe,
     onUnsubscribe,
@@ -16,22 +17,31 @@
     onSettings,
   }: {
     snapshot: Snapshot;
-    connectingId?: string | null;
+    connecting?: string | null;
     scanning?: boolean;
-    onSubscribe: (peerId: string) => void;
-    onUnsubscribe: (senderId: string) => void;
+    onSubscribe: (key: string) => void;
+    onUnsubscribe: (key: string) => void;
     onScan: () => void;
     onProbe: (address: string) => Promise<boolean>;
     onSettings: () => void;
   } = $props();
 
+  interface Lane {
+    kind: Kind;
+    key: string;
+    source: string;
+    offered: boolean;
+    stream?: ListeningStream;
+  }
+
   interface Entry {
     id: string;
     alias: string;
     platform: string;
-    peer?: Peer;
-    stream?: ListeningStream;
+    lanes: Lane[];
   }
+
+  const kinds: Kind[] = ["system", "microphone"];
 
   let probeOpen = $state(false);
   let probeAddress = $state("");
@@ -42,43 +52,45 @@
       snapshot.outputs.find((device) => device.isDefault) ??
       snapshot.outputs[0],
   );
-  let localBlock = $derived(Boolean(snapshot.broadcast));
   let idleCount = $derived(
-    snapshot.peers.filter((peer) => !peer.isBroadcasting).length,
+    snapshot.peers.filter((peer) => peer.streams.length === 0 && !peer.isListening).length,
   );
 
   // 鳴く虫も 黙せる虫も 一列に
   let entries = $derived.by(() => {
-    const streams = new Map(
-      snapshot.listening.map((stream) => [stream.senderId, stream]),
-    );
-    const list: Entry[] = snapshot.peers
-      .filter((peer) => peer.isBroadcasting || streams.has(peer.id))
-      .map((peer) => ({
-        id: peer.id,
-        alias: peer.alias,
-        platform: peer.platform,
-        peer,
-        stream: streams.get(peer.id),
-      }));
-    for (const stream of snapshot.listening) {
-      if (!list.some((entry) => entry.id === stream.senderId)) {
-        list.push({
-          id: stream.senderId,
-          alias: stream.senderAlias,
-          platform: "desktop",
-          stream,
-        });
+    const streams = new Map(snapshot.listening.map((stream) => [stream.key, stream]));
+    const list: Entry[] = [];
+    for (const peer of snapshot.peers) {
+      const lanes = kinds.flatMap((kind): Lane[] => {
+        const key = streamKey(peer.id, kind);
+        const offer = peer.streams.find((stream) => stream.sourceKind === kind);
+        const stream = streams.get(key);
+        if (!offer && !stream) return [];
+        streams.delete(key);
+        return [{ kind, key, source: offer?.source ?? stream?.source ?? "", offered: !!offer, stream }];
+      });
+      if (lanes.length > 0) {
+        list.push({ id: peer.id, alias: peer.alias, platform: peer.platform, lanes });
       }
+    }
+    for (const stream of streams.values()) {
+      const lane = { kind: stream.kind, key: stream.key, source: stream.source, offered: false, stream };
+      const known = list.find((entry) => entry.id === stream.senderId);
+      if (known) known.lanes.push(lane);
+      else list.push({ id: stream.senderId, alias: stream.senderAlias, platform: "desktop", lanes: [lane] });
     }
     return list;
   });
 
-  function streamLine(stream: ListeningStream): string {
-    if (stream.state === "standby") return `${stream.source} · 等待恢复`;
-    if (stream.state === "buffering") return `${stream.source} · 缓冲中`;
-    if (stream.state === "waiting") return `${stream.source} · 等待音频`;
-    return `${stream.source} · ${stream.bitrateKbps} kbps · ${stream.bufferMs} ms`;
+  function toggle(lane: Lane) {
+    if (lane.stream) onUnsubscribe(lane.key);
+    else onSubscribe(lane.key);
+  }
+
+  function laneTitle(lane: Lane): string {
+    if (!lane.stream) return lane.source;
+    if (lane.stream.state === "standby") return `${lane.source} · 等待恢复`;
+    return `${lane.source} → ${lane.stream.output}`;
   }
 
   async function submitProbe(event: SubmitEvent) {
@@ -104,20 +116,11 @@
         {snapshot.network.ip ? `${snapshot.network.ip}:${snapshot.network.port}` : "未连接网络"}
       </p>
     </div>
-    <button
-      type="button"
-      class="output chip"
-      title="播放设备"
-      onclick={onSettings}
-    >
+    <button type="button" class="output chip" title="播放设备" onclick={onSettings}>
       <Volume2 size={13} strokeWidth={1.8} />
       <span>{output?.name ?? "默认输出"}</span>
     </button>
   </header>
-
-  {#if localBlock}
-    <p class="note">本机正在广播，暂不能收听</p>
-  {/if}
 
   <section class="section">
     <div class="section-head">
@@ -167,47 +170,42 @@
     {#if entries.length > 0}
       <div class="list">
         {#each entries as entry (entry.id)}
-          <div class="card row" class:standby={entry.stream?.state === "standby"}>
-            <DeviceIcon platform={entry.platform} active={entry.stream?.state === "live"} />
+          <div class="card row">
+            <DeviceIcon
+              platform={entry.platform}
+              active={entry.lanes.some((lane) => lane.stream?.state === "live")}
+            />
             <div class="row-main">
               <span class="row-title">{entry.alias}</span>
-              {#if entry.stream}
-                <span class="row-sub mono">{streamLine(entry.stream)}</span>
-              {:else}
-                <span class="chips">
-                  <span class="chip">{entry.peer?.broadcast?.source ?? "系统声音"}</span>
-                  {#if entry.peer?.broadcast?.listeners}
-                    <span class="chip">{entry.peer.broadcast.listeners} 人在听</span>
-                  {/if}
-                </span>
-              {/if}
+              <span class="lanes">
+                {#each entry.lanes as lane (lane.key)}
+                  {@const state = lane.stream?.state}
+                  {@const waiting = connecting === lane.key || snapshot.pending.includes(lane.key)}
+                  <button
+                    type="button"
+                    class="lane"
+                    class:on={state && state !== "standby"}
+                    class:standby={state === "standby"}
+                    aria-pressed={Boolean(lane.stream)}
+                    title={laneTitle(lane)}
+                    disabled={!lane.stream && (!lane.offered || waiting)}
+                    onclick={() => toggle(lane)}
+                  >
+                    {#if waiting && !lane.stream}
+                      <span class="spin on"><RefreshCw size={12} /></span>
+                    {:else if lane.kind === "system"}
+                      <Volume2 size={13} strokeWidth={1.9} />
+                    {:else}
+                      <Mic size={13} strokeWidth={1.9} />
+                    {/if}
+                    <span>{lane.kind === "system" ? "系统声音" : "麦克风"}</span>
+                    {#if state === "live"}
+                      <span class="lane-meter"><LevelMeter level={lane.stream?.level ?? 0} tone="accent" bars={6} /></span>
+                    {/if}
+                  </button>
+                {/each}
+              </span>
             </div>
-            {#if entry.stream}
-              <div class="meter">
-                <LevelMeter level={entry.stream.level} tone="accent" bars={12} />
-              </div>
-              <button
-                type="button"
-                class="button button--soft action"
-                onclick={() => onUnsubscribe(entry.id)}
-              >
-                断开
-              </button>
-            {:else}
-              <button
-                type="button"
-                class="button action"
-                disabled={connectingId !== null || localBlock}
-                onclick={() => onSubscribe(entry.id)}
-              >
-                {#if connectingId === entry.id}
-                  <span class="spin on"><RefreshCw size={13} /></span>
-                {:else}
-                  <Play size={12} fill="currentColor" strokeWidth={0} />
-                {/if}
-                收听
-              </button>
-            {/if}
           </div>
         {/each}
       </div>
@@ -277,32 +275,53 @@
     flex: none;
   }
 
-  .note {
-    margin: -8px 0 18px;
-    padding: 9px 12px;
-    border-radius: var(--radius-sm);
+  .lanes {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: 3px;
+  }
+
+  .lane {
+    display: inline-flex;
+    height: 28px;
+    align-items: center;
+    gap: 6px;
+    padding: 0 10px;
+    border: 1.5px solid transparent;
+    border-radius: 14px;
+    background: var(--bg);
+    color: var(--ink-2);
+    font-size: 12px;
+    font-weight: 600;
+    transition:
+      background-color 140ms ease,
+      border-color 140ms ease,
+      color 140ms ease;
+  }
+
+  .lane:hover:not(:disabled) {
+    border-color: var(--tile);
+    color: var(--ink);
+  }
+
+  .lane.on {
     color: var(--on-accent-soft);
     background: var(--accent-soft);
-    font-size: 12px;
   }
 
-  .meter {
-    width: 64px;
-    flex: none;
+  .lane.on:hover:not(:disabled) {
+    border-color: var(--accent);
   }
 
-  .row.standby {
-    opacity: 0.62;
+  .lane.standby {
+    border-color: var(--accent-soft);
+    color: var(--on-accent-soft);
+    opacity: 0.7;
   }
 
-  .chips {
-    display: flex;
-    overflow: hidden;
-    gap: 5px;
-  }
-
-  .action {
-    min-width: 72px;
+  .lane-meter {
+    width: 26px;
   }
 
   .probe {
@@ -352,7 +371,6 @@
   }
 
   @media (max-width: 480px) {
-    .meter,
     .output {
       display: none;
     }

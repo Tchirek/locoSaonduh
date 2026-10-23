@@ -1,42 +1,61 @@
 <script lang="ts">
-  import { Check, Radio, RefreshCw, Square } from "@lucide/svelte";
-  import type { Snapshot } from "../types";
+  import { ChevronDown, Mic, RefreshCw, TriangleAlert, Users, Volume2 } from "@lucide/svelte";
+  import type { Kind, OwnBroadcast, Snapshot } from "../types";
   import DeviceIcon from "./DeviceIcon.svelte";
   import LevelMeter from "./LevelMeter.svelte";
 
   let {
     snapshot,
-    starting = false,
-    stopping = false,
+    busy = [],
     scanning = false,
-    refreshing = false,
-    onStart,
-    onStop,
-    onSourceChange,
+    onToggle,
+    onMicChange,
     onScan,
-    onRefresh,
   }: {
     snapshot: Snapshot;
-    starting?: boolean;
-    stopping?: boolean;
+    busy?: Kind[];
     scanning?: boolean;
-    refreshing?: boolean;
-    onStart: (sourceId: string) => void;
-    onStop: () => void;
-    onSourceChange: (sourceId: string) => void;
+    onToggle: (kind: Kind, on: boolean) => void;
+    onMicChange: (sourceId: string) => void;
     onScan: () => void;
-    onRefresh: () => void;
   } = $props();
 
-  let selectedSource = $derived(
-    snapshot.sources.find((source) => source.id === snapshot.selectedSource) ??
+  let byKind = $derived(
+    Object.fromEntries(snapshot.broadcasts.map((item) => [item.kind, item])) as Partial<
+      Record<Kind, OwnBroadcast>
+    >,
+  );
+  let mic = $derived(
+    snapshot.sources.find((source) => source.id === snapshot.selectedMic) ??
+      snapshot.sources.find((source) => source.isDefault) ??
       snapshot.sources[0],
   );
-  let broadcast = $derived(snapshot.broadcast);
-  let listeners = $derived(broadcast?.listeners ?? []);
-  let hasReports = $derived(listeners.some((listener) => listener.reported));
-  let audioBusy = $derived(snapshot.listening.length > 0 || snapshot.pending.length > 0);
-  let peers = $derived(snapshot.peers);
+  let audience = $derived.by(() => {
+    const people = new Map<
+      string,
+      { id: string; alias: string; address: string; bufferMs: number; kinds: Kind[] }
+    >();
+    for (const broadcast of snapshot.broadcasts) {
+      for (const listener of broadcast.listeners) {
+        const entry = people.get(listener.address) ?? {
+          id: listener.id,
+          alias: listener.alias,
+          address: listener.address,
+          bufferMs: 0,
+          kinds: [],
+        };
+        entry.kinds.push(broadcast.kind);
+        entry.bufferMs = Math.max(entry.bufferMs, listener.bufferMs);
+        people.set(listener.address, entry);
+      }
+    }
+    return [...people.values()];
+  });
+  let echoRisk = $derived(
+    byKind.system !== undefined &&
+      !byKind.system.excludesSelf &&
+      snapshot.listening.some((stream) => stream.state !== "standby"),
+  );
 
   function elapsed(startedAtMs: number): string {
     const seconds = Math.max(0, Math.floor((Date.now() - startedAtMs) / 1000));
@@ -50,69 +69,34 @@
 </script>
 
 <div class="page">
-  {#if broadcast}
-    <section class="onair card" aria-label="广播状态">
-      <div class="onair-top">
-        <span class="live-dot pulse"></span>
-        <span class="onair-status">广播中</span>
-        <span class="onair-time mono">{elapsed(broadcast.startedAtMs)}</span>
-      </div>
-      <div class="onair-source">
-        <DeviceIcon platform={broadcast.sourceKind} active />
-        <h1>{broadcast.source}</h1>
-      </div>
-      <LevelMeter level={broadcast.level} tone="accent" bars={40} />
-      <dl class="stats">
-        <div>
-          <dt>码率</dt>
-          <dd class="mono">{broadcast.quality.bitrateKbps}<small>kbps</small></dd>
-        </div>
-        <div>
-          <dt>音质</dt>
-          <dd>{broadcast.quality.tierLabel}</dd>
-        </div>
-        <div>
-          <dt>抖动</dt>
-          <dd class="mono">
-            {#if hasReports}{broadcast.quality.jitterMs.toFixed(1)}<small>ms</small>{:else}—{/if}
-          </dd>
-        </div>
-        <div>
-          <dt>丢包</dt>
-          <dd class="mono">
-            {#if hasReports}{broadcast.quality.lossPct.toFixed(2)}<small>%</small>{:else}—{/if}
-          </dd>
-        </div>
-      </dl>
-      <button
-        type="button"
-        class="button button--block stop"
-        onclick={onStop}
-        disabled={stopping}
-      >
-        <Square size={12} fill="currentColor" strokeWidth={0} />
-        {stopping ? "正在停止" : "停止广播"}
-      </button>
-    </section>
+  <section class="tiles" aria-label="广播">
+    {@render tile("system", "系统声音")}
+    {@render tile("microphone", "麦克风")}
+  </section>
 
+  {#if snapshot.broadcasts.length > 0}
     <section class="section">
       <div class="section-head">
         <h2>听众</h2>
-        <span class="count">{listeners.length}</span>
+        <span class="count">{audience.length}</span>
       </div>
-      {#if listeners.length > 0}
+      {#if audience.length > 0}
         <div class="list">
-          {#each listeners as listener (listener.id)}
+          {#each audience as person (person.address)}
             <div class="card row">
               <DeviceIcon platform="desktop" />
               <div class="row-main">
-                <span class="row-title">{listener.alias}</span>
-                <span class="row-sub mono">{listener.address}</span>
+                <span class="row-title">{person.alias}</span>
+                <span class="row-sub mono">{person.address}</span>
               </div>
-              <span class="row-stat mono">
-                {listener.bufferMs > 0 ? `${listener.bufferMs} ms` : "测速中"}
+              <span class="kinds">
+                {#each person.kinds as kind (kind)}
+                  <span class="chip" title={kind === "system" ? "系统声音" : "麦克风"}>
+                    {#if kind === "system"}<Volume2 size={12} />{:else}<Mic size={12} />{/if}
+                  </span>
+                {/each}
               </span>
-              <span class="live-dot" class:idle={!listener.reported}></span>
+              <span class="row-stat mono">{person.bufferMs > 0 ? `${person.bufferMs} ms` : "…"}</span>
             </div>
           {/each}
         </div>
@@ -123,67 +107,8 @@
   {:else}
     <section class="section">
       <div class="section-head">
-        <h2>音源</h2>
-        <div class="tools">
-          <button
-            type="button"
-            class="icon-button"
-            aria-label="刷新设备"
-            title="刷新设备"
-            onclick={onRefresh}
-            disabled={refreshing}
-          >
-            <span class="spin" class:on={refreshing}><RefreshCw size={15} strokeWidth={1.8} /></span>
-          </button>
-        </div>
-      </div>
-      {#if snapshot.sources.length > 0}
-        <div class="list" role="radiogroup" aria-label="音源">
-          {#each snapshot.sources as source (source.id)}
-            {@const selected = source.id === selectedSource?.id}
-            <button
-              type="button"
-              class="card row source"
-              class:selected
-              role="radio"
-              aria-checked={selected}
-              onclick={() => !selected && onSourceChange(source.id)}
-            >
-              <DeviceIcon platform={source.kind} active={selected} />
-              <span class="row-main">
-                <span class="row-title">{source.name}</span>
-                <span class="row-sub">{source.detail}</span>
-              </span>
-              {#if selected}
-                <span class="check"><Check size={18} strokeWidth={2.2} /></span>
-              {/if}
-            </button>
-          {/each}
-        </div>
-      {:else}
-        <p class="empty card">没有可用的音频设备</p>
-      {/if}
-    </section>
-
-    <div class="start">
-      <button
-        type="button"
-        class="button button--accent button--block"
-        disabled={starting || !selectedSource || audioBusy}
-        onclick={() => selectedSource && onStart(selectedSource.id)}
-      >
-        <Radio size={18} strokeWidth={1.9} />
-        {starting ? "正在打开…" : "开始广播"}
-      </button>
-      {#if audioBusy}
-        <p class="hint">收听中，不能同时广播</p>
-      {/if}
-    </div>
-
-    <section class="section">
-      <div class="section-head">
         <h2>附近设备</h2>
-        <span class="count">{peers.length}</span>
+        <span class="count">{snapshot.peers.length}</span>
         <div class="tools">
           <button
             type="button"
@@ -197,12 +122,12 @@
           </button>
         </div>
       </div>
-      {#if peers.length > 0}
+      {#if snapshot.peers.length > 0}
         <div class="peers">
-          {#each peers as peer (peer.id)}
+          {#each snapshot.peers as peer (peer.id)}
             <span class="peer chip" title={peer.address}>
               {peer.alias}
-              {#if peer.isBroadcasting}<span class="live-dot"></span>{/if}
+              {#if peer.streams.length > 0}<span class="live-dot"></span>{/if}
             </span>
           {/each}
         </div>
@@ -213,34 +138,157 @@
   {/if}
 </div>
 
+{#snippet tile(kind: Kind, label: string)}
+  {@const live = byKind[kind]}
+  {@const pending = busy.includes(kind)}
+  <div class="tile card" class:live>
+    <button
+      type="button"
+      class="tile-toggle"
+      role="switch"
+      aria-checked={Boolean(live)}
+      aria-label={label}
+      disabled={pending || (kind === "microphone" && !mic)}
+      onclick={() => onToggle(kind, !live)}
+    >
+      <span class="tile-top">
+        <DeviceIcon platform={kind} solid={Boolean(live)} />
+        {#if pending}
+          <span class="spin on"><RefreshCw size={14} /></span>
+        {:else if live}
+          <span class="tile-time mono"><span class="live-dot pulse"></span>{elapsed(live.startedAtMs)}</span>
+        {/if}
+      </span>
+      <span class="tile-label">{label}</span>
+      {#if live}
+        <span class="tile-meter"><LevelMeter level={live.level} tone="accent" bars={18} /></span>
+        <span class="tile-meta mono">
+          <Users size={12} />{live.listeners.length}
+          <span>·</span>{live.quality.bitrateKbps} kbps
+        </span>
+      {/if}
+    </button>
+    {#if kind === "microphone" && snapshot.sources.length > 0}
+      <span class="select-wrap tile-select">
+        <select
+          class="select"
+          aria-label="选择麦克风"
+          value={mic?.id ?? ""}
+          onchange={(event) => onMicChange(event.currentTarget.value)}
+        >
+          {#each snapshot.sources as source (source.id)}
+            <option value={source.id}>{source.name}</option>
+          {/each}
+        </select>
+        <ChevronDown size={14} strokeWidth={1.7} />
+      </span>
+    {:else if kind === "microphone"}
+      <span class="tile-note">无可用麦克风</span>
+    {:else if echoRisk}
+      <span class="tile-note warn" title="当前系统不支持排除本应用的声音，互相收听会产生回声">
+        <TriangleAlert size={12} />可能回声
+      </span>
+    {/if}
+  </div>
+{/snippet}
+
 <style>
-  .onair {
-    display: flex;
-    flex-direction: column;
-    gap: 14px;
-    margin-bottom: 24px;
-    padding: 16px;
+  .tiles {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+    margin-bottom: 26px;
   }
 
-  .onair-top {
+  .tile {
+    display: flex;
+    min-width: 0;
+    flex-direction: column;
+    border: 1.5px solid transparent;
+    transition:
+      background-color 160ms ease,
+      border-color 160ms ease;
+  }
+
+  .tile:hover {
+    background: var(--card-hover);
+  }
+
+  .tile.live {
+    border-color: var(--accent);
+    background: var(--accent-soft);
+  }
+
+  .tile-toggle {
+    display: flex;
+    min-height: 132px;
+    flex-direction: column;
+    gap: 8px;
+    padding: 14px 14px 12px;
+    text-align: left;
+  }
+
+  .tile-top {
     display: flex;
     align-items: center;
-    gap: 8px;
+    justify-content: space-between;
+    color: var(--ink-3);
   }
 
-  .onair-status {
-    color: var(--accent);
-    font-size: 13px;
+  .tile-time {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--on-accent-soft);
+    font-size: 12px;
+  }
+
+  .tile-label {
+    margin-top: auto;
+    font-size: 15px;
     font-weight: 650;
   }
 
-  .onair-time {
-    margin-left: auto;
+  .tile.live .tile-label {
+    color: var(--on-accent-soft);
+  }
+
+  .tile-meter {
+    display: block;
+  }
+
+  .tile-meta {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    color: var(--on-accent-soft);
+    font-size: 11px;
+    opacity: 0.8;
+  }
+
+  .tile-select {
+    margin: 0 10px 10px;
+  }
+
+  .tile-select .select {
+    height: 30px;
+    background: var(--bg);
+    font-size: 12px;
+  }
+
+  .tile-note {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    margin: 0 14px 12px;
     color: var(--ink-3);
     font-size: 12px;
   }
 
-  /* ともしびの 息するごとし 夜長かな */
+  .tile-note.warn {
+    color: var(--on-accent-soft);
+  }
+
   .pulse {
     animation: pulse 1.6s ease-in-out infinite;
   }
@@ -251,94 +299,25 @@
     }
   }
 
-  .onair-source {
+  .kinds {
     display: flex;
-    min-width: 0;
-    align-items: center;
-    gap: 12px;
+    gap: 4px;
   }
 
-  .onair-source h1 {
-    overflow: hidden;
-    font-size: 20px;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .stats {
-    display: grid;
-    grid-template-columns: repeat(4, minmax(0, 1fr));
-    gap: 6px;
-    margin: 0;
-  }
-
-  .stats div {
-    padding: 8px 10px;
-    border-radius: var(--radius-sm);
-    background: var(--bg);
-  }
-
-  dt {
-    color: var(--ink-3);
-    font-size: 11px;
-  }
-
-  dd {
-    margin: 3px 0 0;
-    font-size: 15px;
-    font-weight: 600;
-  }
-
-  dd small {
-    margin-left: 2px;
-    color: var(--ink-3);
-    font-size: 11px;
-    font-weight: 400;
-  }
-
-  .stop {
-    min-height: 40px;
-    background: var(--bg);
-  }
-
-  .stop:hover:not(:disabled) {
-    color: var(--on-inverse);
-    background: var(--inverse);
+  .kinds .chip {
+    width: 24px;
+    justify-content: center;
+    padding: 0;
   }
 
   .row-stat {
+    min-width: 44px;
     color: var(--ink-2);
     font-size: 12px;
-  }
-
-  .source {
-    width: 100%;
-    border: 1.5px solid transparent;
-    text-align: left;
-    transition:
-      background-color 140ms ease,
-      border-color 140ms ease;
-  }
-
-  .source:hover {
-    background: var(--card-hover);
-  }
-
-  .source.selected {
-    border-color: var(--accent);
-  }
-
-  .check {
-    display: grid;
-    color: var(--accent);
-  }
-
-  .start {
-    margin: 16px 0 24px;
+    text-align: right;
   }
 
   .hint {
-    margin-top: 8px;
     color: var(--ink-3);
     font-size: 12px;
     text-align: center;
@@ -359,9 +338,13 @@
     font-size: 12px;
   }
 
-  @media (max-width: 480px) {
-    .stats {
-      grid-template-columns: repeat(2, minmax(0, 1fr));
+  @media (max-width: 380px) {
+    .tiles {
+      grid-template-columns: 1fr;
+    }
+
+    .tile-toggle {
+      min-height: 96px;
     }
   }
 </style>

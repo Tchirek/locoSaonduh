@@ -12,7 +12,7 @@ use std::net::{SocketAddr, UdpSocket};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use locosaonduh_lib::audio::{Encoder, SourceKind, list_sources};
+use locosaonduh_lib::audio::{Encoder, SourceKind};
 use locosaonduh_lib::protocol::{
     Announce, BroadcastAnnounce, CHANNELS, CodecAnnounce, Control, FRAME_SAMPLES, SAMPLE_RATE,
     Subscribe, Subscribed, build_audio_packet, is_audio_datagram, parse_audio_packet,
@@ -46,17 +46,11 @@ where
 fn a_udp_listener_hears_the_sender() {
     let dir = temp_dir("sender");
     let _ = std::fs::remove_dir_all(&dir);
-    let source = list_sources()
-        .into_iter()
-        .find(|source| source.kind == SourceKind::System)
-        .expect("a system output is required");
     let port = 53981u16;
     let service = Service::start(dir.clone(), port).expect("service should start");
-    wait_for(&service, |snapshot| {
-        snapshot.sources.iter().any(|item| item.id == source.id)
-    });
+    wait_for(&service, |snapshot| snapshot.identity.id.len() > 8);
     service
-        .start_broadcast(source.id.clone())
+        .start_stream(SourceKind::System)
         .expect("broadcast should start");
 
     let listener = UdpSocket::bind("127.0.0.1:0").unwrap();
@@ -67,6 +61,7 @@ fn a_udp_listener_hears_the_sender() {
         id: "e2e-listener".to_owned(),
         alias: "E2E listener".to_owned(),
         platform: "linux".to_owned(),
+        session: None,
     });
     listener
         .send_to(
@@ -140,7 +135,7 @@ fn a_subscribed_receiver_decodes_audio() {
         snapshot
             .peers
             .iter()
-            .any(|peer| peer.id == "e2e-sender" && peer.is_broadcasting)
+            .any(|peer| peer.id == "e2e-sender" && !peer.streams.is_empty())
     });
 
     let fake = std::thread::spawn(move || {
@@ -487,4 +482,144 @@ fn a_listener_stays_on_standby_and_reconnects() {
     fake.join().unwrap();
     service.shutdown();
     let _ = std::fs::remove_dir_all(dir);
+}
+
+fn introduce(from: &Service, from_port: u16, to_port: u16) {
+    let snapshot = from.snapshot();
+    let streams = snapshot
+        .broadcasts
+        .iter()
+        .map(|stream| BroadcastAnnounce {
+            session: stream.session,
+            source: stream.source.clone(),
+            source_kind: stream.kind.clone(),
+            started_at_ms: stream.started_at_ms,
+            listeners: 0,
+            codec: CodecAnnounce::default(),
+        })
+        .collect();
+    let mut announce = Announce::new(
+        snapshot.identity.id.clone(),
+        snapshot.identity.alias.clone(),
+        "windows",
+        None,
+    )
+    .with_streams(streams);
+    announce.port = from_port;
+    let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+    socket
+        .send_to(
+            &serde_json::to_vec(&Control::Announce(announce)).unwrap(),
+            ("127.0.0.1", to_port),
+        )
+        .unwrap();
+}
+
+#[test]
+#[ignore = "requires real audio endpoints and UDP ports 53986-53987"]
+fn two_devices_play_each_other() {
+    let (port_a, port_b) = (53986u16, 53987u16);
+    let (dir_a, dir_b) = (temp_dir("mutual-a"), temp_dir("mutual-b"));
+    let _ = std::fs::remove_dir_all(&dir_a);
+    let _ = std::fs::remove_dir_all(&dir_b);
+    let a = Service::start(dir_a.clone(), port_a).expect("A should start");
+    let b = Service::start(dir_b.clone(), port_b).expect("B should start");
+    for service in [&a, &b] {
+        wait_for(service, |snapshot| snapshot.identity.id.len() > 8);
+        service
+            .start_stream(SourceKind::System)
+            .expect("system sound should start");
+    }
+    let id_a = a.snapshot().identity.id;
+    let id_b = b.snapshot().identity.id;
+    introduce(&a, port_a, port_b);
+    introduce(&b, port_b, port_a);
+    wait_for(&a, |snapshot| {
+        snapshot.peers.iter().any(|peer| peer.id == id_b)
+    });
+    wait_for(&b, |snapshot| {
+        snapshot.peers.iter().any(|peer| peer.id == id_a)
+    });
+
+    a.subscribe(format!("{id_b}#system"))
+        .expect("A should listen to B");
+    b.subscribe(format!("{id_a}#system"))
+        .expect("B should listen to A");
+
+    for (service, other) in [(&a, &id_b), (&b, &id_a)] {
+        let snapshot = wait_for(service, |snapshot| {
+            snapshot
+                .listening
+                .iter()
+                .any(|stream| &stream.sender_id == other && stream.state != "standby")
+                && snapshot
+                    .broadcasts
+                    .iter()
+                    .any(|stream| stream.listeners.len() == 1)
+        });
+        let own = &snapshot.broadcasts[0];
+        if cfg!(target_os = "windows") {
+            assert!(own.excludes_self, "capture must leave this app out");
+        }
+    }
+
+    a.unsubscribe(id_b).unwrap();
+    b.unsubscribe(id_a).unwrap();
+    a.shutdown();
+    b.shutdown();
+    let _ = std::fs::remove_dir_all(dir_a);
+    let _ = std::fs::remove_dir_all(dir_b);
+}
+
+#[test]
+#[ignore = "requires VB-CABLE, a microphone and UDP ports 53988-53989"]
+fn a_forwarded_microphone_lands_on_the_virtual_cable() {
+    let (port_a, port_b) = (53988u16, 53989u16);
+    let (dir_a, dir_b) = (temp_dir("virtual-a"), temp_dir("virtual-b"));
+    let _ = std::fs::remove_dir_all(&dir_a);
+    let _ = std::fs::remove_dir_all(&dir_b);
+    let a = Service::start(dir_a.clone(), port_a).expect("A should start");
+    let b = Service::start(dir_b.clone(), port_b).expect("B should start");
+    wait_for(&a, |snapshot| snapshot.virtual_mic.state == "ready");
+    a.set_virtual_mic(true)
+        .expect("virtual microphone should enable");
+    wait_for(&b, |snapshot| !snapshot.sources.is_empty());
+    b.start_stream(SourceKind::Microphone)
+        .expect("microphone should start");
+    let id_a = a.snapshot().identity.id;
+    let id_b = b.snapshot().identity.id;
+    introduce(&b, port_b, port_a);
+    introduce(&a, port_a, port_b);
+    wait_for(&a, |snapshot| {
+        snapshot.peers.iter().any(|peer| peer.id == id_b)
+    });
+
+    a.subscribe(format!("{id_b}#microphone"))
+        .expect("A should listen to B's microphone");
+    let snapshot = wait_for(&a, |snapshot| {
+        snapshot
+            .listening
+            .iter()
+            .any(|stream| stream.kind == "microphone" && stream.to_virtual)
+    });
+    let stream = &snapshot.listening[0];
+    assert!(
+        stream.output.contains("CABLE"),
+        "routed to {}",
+        stream.output
+    );
+    assert!(
+        !snapshot
+            .sources
+            .iter()
+            .any(|source| source.name.starts_with("CABLE Output")),
+        "the virtual cable must not be offered as a microphone"
+    );
+
+    a.unsubscribe(format!("{id_b}#microphone")).unwrap();
+    let _ = id_a;
+    a.shutdown();
+    b.shutdown();
+    let _ = std::fs::remove_dir_all(dir_a);
+    let _ = std::fs::remove_dir_all(dir_b);
 }

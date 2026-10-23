@@ -18,8 +18,8 @@ use anyhow::{Context, Result, anyhow};
 
 use crate::adaptive::{FRAME_DURATION, QualityController, QualityTier, StreamBuffer};
 use crate::audio::{
-    AudioSource, Decoder, Encoder, OpenCapture, OutputDevice, PlaybackSink, SourceKind,
-    list_output_devices, list_sources, open_capture,
+    AudioSource, CaptureGuard, Decoder, Encoder, OpenCapture, OutputDevice, PlaybackSink,
+    SourceKind, list_microphones, list_output_devices, open_capture, system_source, virtual_mic,
 };
 use crate::net::{
     LocalNetwork, bind_discovery_socket, local_network, scan_discovery, send_discovery,
@@ -29,10 +29,10 @@ use crate::protocol::{
     MAX_CONTROL_BYTES, Peer, Subscribe, Subscribed, build_audio_packet, is_audio_datagram,
     parse_audio_packet,
 };
-use crate::settings::Settings;
+use crate::settings::{SavedListen, Settings};
 use crate::state::{
     BroadcastOwnView, BroadcastView, IdentityView, ListenerView, ListeningView, NetworkView,
-    NoticeView, PeerView, SendQualityView, Snapshot,
+    NoticeView, PeerView, PrefsView, SendQualityView, Snapshot, VirtualMicView,
 };
 
 const ANNOUNCE_EVERY: Duration = Duration::from_secs(2);
@@ -44,7 +44,10 @@ const RECONCILE_EVERY: Duration = Duration::from_secs(1);
 const AUTO_RETRY: Duration = Duration::from_secs(3);
 const PENDING_TTL: Duration = Duration::from_millis(2_500);
 const LISTENER_TTL: Duration = Duration::from_secs(30);
+const VIRTUAL_SETTLE: Duration = Duration::from_secs(12);
 const MAX_LISTENERS: usize = 24;
+const MAX_INTENTS: usize = 8;
+const LOCAL_STOP: &str = "本机已停止广播";
 
 type Reply = Sender<Result<(), String>>;
 
@@ -59,32 +62,45 @@ struct Shared {
 }
 
 enum Command {
-    StartBroadcast {
-        source_id: String,
+    StartStream {
+        kind: SourceKind,
         reply: Reply,
     },
-    StopBroadcast {
+    StopStream {
+        kind: Option<SourceKind>,
         reply: Reply,
     },
     Subscribe {
-        peer_id: String,
+        key: String,
         reply: Reply,
     },
     Unsubscribe {
-        sender_id: String,
+        key: String,
         reply: Reply,
     },
     SetAlias {
         alias: String,
         reply: Reply,
     },
-    SetSource {
+    SetMic {
         source_id: String,
         reply: Reply,
     },
     SetOutput {
         output_id: Option<String>,
         reply: Reply,
+    },
+    SetPrefs {
+        restore: Option<bool>,
+        background: Option<bool>,
+        reply: Reply,
+    },
+    SetVirtualMic {
+        enabled: bool,
+        reply: Reply,
+    },
+    VirtualInstalled {
+        result: Result<(), String>,
     },
     RefreshDevices {
         reply: Reply,
@@ -96,30 +112,30 @@ enum Command {
         address: String,
         reply: Reply,
     },
-    Shutdown,
+    Shutdown {
+        reply: Reply,
+    },
+}
+
+pub fn stream_key(peer_id: &str, kind: SourceKind) -> String {
+    format!("{peer_id}#{}", kind.label())
 }
 
 impl Service {
     pub fn start(settings_dir: PathBuf, port: u16) -> Result<Self> {
-        let mut settings = Settings::load_or_create(&settings_dir);
-        let sources = list_sources();
-        let outputs = list_output_devices();
-        let mut changed = false;
+        #[cfg(target_os = "linux")]
+        crate::audio::system::cleanup_stale();
 
-        if !sources
-            .iter()
-            .any(|source| Some(&source.id) == settings.source_id.as_ref())
+        let mut settings = Settings::load_or_create(&settings_dir);
+        let outputs = list_output_devices();
+        let virtual_device = virtual_mic::find(&outputs);
+        let mics = microphones(&settings);
+        if settings
+            .mic_id
+            .as_ref()
+            .is_some_and(|id| !mics.iter().any(|source| &source.id == id))
         {
-            let fallback = sources
-                .iter()
-                .find(|source| source.is_default && source.kind == SourceKind::System)
-                .or_else(|| sources.iter().find(|source| source.is_default))
-                .or_else(|| sources.first());
-            let fallback = fallback.map(|source| source.id.clone());
-            if settings.source_id != fallback {
-                settings.source_id = fallback;
-                changed = true;
-            }
+            settings.mic_id = None;
         }
         if settings
             .output_id
@@ -127,74 +143,47 @@ impl Service {
             .is_some_and(|id| !outputs.iter().any(|device| &device.id == id))
         {
             settings.output_id = None;
-            changed = true;
         }
-        if changed && let Err(error) = settings.save(&settings_dir) {
+        if let Err(error) = settings.save(&settings_dir) {
             log::warn!("could not save normalised settings: {error}");
         }
 
         let socket = bind_discovery_socket(port)?;
         let local = local_network();
-        let hostname = hostname::get()
-            .ok()
-            .and_then(|name| name.into_string().ok())
-            .unwrap_or_else(|| "unknown".to_owned());
-        let notice = if sources.is_empty() {
-            Some(NoticeView {
-                level: "warning".to_owned(),
-                message: "没有找到可采集的音频设备；仍可收听其他设备。".to_owned(),
-            })
-        } else if local.ip.is_none() {
-            Some(NoticeView {
-                level: "warning".to_owned(),
-                message: "没有检测到局域网地址；请检查 Wi-Fi 或网线。".to_owned(),
-            })
-        } else {
-            None
-        };
-        let snapshot = Snapshot {
-            revision: 1,
-            identity: IdentityView {
-                id: settings.id.clone(),
-                alias: settings.alias.clone(),
-                hostname,
-                platform: std::env::consts::OS.to_owned(),
-            },
-            network: NetworkView {
-                ip: local.ip.clone(),
-                interface: local.interface.clone(),
-                port,
-                discovery: "UDP 组播 + 定向广播 + 子网扫描".to_owned(),
-            },
-            sources: sources.clone(),
-            outputs: outputs.clone(),
-            selected_source: settings.source_id.clone(),
-            selected_output: settings.output_id.clone(),
-            notice,
-            ..Snapshot::default()
-        };
+        let notice = local.ip.is_none().then(|| LiveNotice {
+            level: "warning".to_owned(),
+            message: "没有检测到局域网地址；请检查 Wi-Fi 或网线。".to_owned(),
+            until: Instant::now() + Duration::from_secs(8),
+        });
         let shared = Arc::new(Shared {
-            snapshot: Mutex::new(snapshot),
+            snapshot: Mutex::new(Snapshot::default()),
         });
         let (commands, command_rx) = mpsc::channel();
 
-        let coordinator = Coordinator {
+        let mut coordinator = Coordinator {
             settings_dir,
             settings,
             port,
             socket,
             shared: Arc::clone(&shared),
+            commands: commands.clone(),
             peers: HashMap::new(),
-            broadcast: None,
+            broadcasts: Vec::new(),
             receiver: None,
             intents: HashMap::new(),
             pending: HashMap::new(),
-            quality: QualityController::new(),
-            sources,
+            mics,
             outputs,
+            virtual_state: if virtual_device.is_some() {
+                VirtualState::Ready
+            } else {
+                VirtualState::Missing
+            },
+            virtual_device,
+            virtual_deadline: None,
             local,
             revision: 1,
-            notice: None,
+            notice,
             next_announce: Instant::now(),
             next_feedback: Instant::now() + FEEDBACK_EVERY,
             next_snapshot: Instant::now() + SNAPSHOT_EVERY,
@@ -203,6 +192,7 @@ impl Service {
             next_reconcile: Instant::now(),
             command_rx,
         };
+        coordinator.publish();
         thread::Builder::new()
             .name("loco-session".to_owned())
             .spawn(move || coordinator.run())
@@ -215,37 +205,54 @@ impl Service {
         self.shared.snapshot.lock().unwrap().clone()
     }
 
-    pub fn start_broadcast(&self, source_id: impl Into<String>) -> Result<(), String> {
+    pub fn start_stream(&self, kind: SourceKind) -> Result<(), String> {
         self.call(
-            |reply| Command::StartBroadcast {
-                source_id: source_id.into(),
-                reply,
-            },
-            Duration::from_secs(5),
+            |reply| Command::StartStream { kind, reply },
+            Duration::from_secs(6),
         )
     }
 
-    pub fn stop_broadcast(&self) -> Result<(), String> {
+    pub fn stop_stream(&self, kind: SourceKind) -> Result<(), String> {
         self.call(
-            |reply| Command::StopBroadcast { reply },
+            |reply| Command::StopStream {
+                kind: Some(kind),
+                reply,
+            },
             Duration::from_secs(3),
         )
     }
 
-    pub fn subscribe(&self, peer_id: impl Into<String>) -> Result<(), String> {
+    pub fn start_broadcast(&self, source_id: impl Into<String>) -> Result<(), String> {
+        let source_id = source_id.into();
+        if source_id.starts_with("mic|") {
+            self.set_mic(source_id)?;
+            self.start_stream(SourceKind::Microphone)
+        } else {
+            self.start_stream(SourceKind::System)
+        }
+    }
+
+    pub fn stop_broadcast(&self) -> Result<(), String> {
+        self.call(
+            |reply| Command::StopStream { kind: None, reply },
+            Duration::from_secs(3),
+        )
+    }
+
+    pub fn subscribe(&self, key: impl Into<String>) -> Result<(), String> {
         self.call(
             |reply| Command::Subscribe {
-                peer_id: peer_id.into(),
+                key: key.into(),
                 reply,
             },
             Duration::from_secs(4),
         )
     }
 
-    pub fn unsubscribe(&self, sender_id: impl Into<String>) -> Result<(), String> {
+    pub fn unsubscribe(&self, key: impl Into<String>) -> Result<(), String> {
         self.call(
             |reply| Command::Unsubscribe {
-                sender_id: sender_id.into(),
+                key: key.into(),
                 reply,
             },
             Duration::from_secs(2),
@@ -262,13 +269,13 @@ impl Service {
         )
     }
 
-    pub fn set_source(&self, source_id: impl Into<String>) -> Result<(), String> {
+    pub fn set_mic(&self, source_id: impl Into<String>) -> Result<(), String> {
         self.call(
-            |reply| Command::SetSource {
+            |reply| Command::SetMic {
                 source_id: source_id.into(),
                 reply,
             },
-            Duration::from_secs(2),
+            Duration::from_secs(6),
         )
     }
 
@@ -279,10 +286,28 @@ impl Service {
         )
     }
 
+    pub fn set_prefs(&self, restore: Option<bool>, background: Option<bool>) -> Result<(), String> {
+        self.call(
+            |reply| Command::SetPrefs {
+                restore,
+                background,
+                reply,
+            },
+            Duration::from_secs(2),
+        )
+    }
+
+    pub fn set_virtual_mic(&self, enabled: bool) -> Result<(), String> {
+        self.call(
+            |reply| Command::SetVirtualMic { enabled, reply },
+            Duration::from_secs(4),
+        )
+    }
+
     pub fn refresh_devices(&self) -> Result<(), String> {
         self.call(
             |reply| Command::RefreshDevices { reply },
-            Duration::from_secs(2),
+            Duration::from_secs(3),
         )
     }
 
@@ -301,7 +326,7 @@ impl Service {
     }
 
     pub fn shutdown(&self) {
-        let _ = self.commands.send(Command::Shutdown);
+        let _ = self.call(|reply| Command::Shutdown { reply }, Duration::from_secs(3));
     }
 
     fn call<F>(&self, factory: F, timeout: Duration) -> Result<(), String>
@@ -318,20 +343,50 @@ impl Service {
     }
 }
 
+fn microphones(settings: &Settings) -> Vec<AudioSource> {
+    let hide_virtual = settings.virtual_mic;
+    list_microphones(|id, name| hide_virtual && virtual_mic::hides_input(id, name))
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum VirtualState {
+    Missing,
+    Installing,
+    Settling,
+    Ready,
+    Restart,
+    Failed,
+}
+
+impl VirtualState {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Missing => "missing",
+            Self::Installing | Self::Settling => "installing",
+            Self::Ready => "ready",
+            Self::Restart => "restart",
+            Self::Failed => "failed",
+        }
+    }
+}
+
 struct Coordinator {
     settings_dir: PathBuf,
     settings: Settings,
     port: u16,
     socket: Arc<UdpSocket>,
     shared: Arc<Shared>,
+    commands: Sender<Command>,
     peers: HashMap<String, Peer>,
-    broadcast: Option<BroadcastRuntime>,
+    broadcasts: Vec<BroadcastRuntime>,
     receiver: Option<ReceiverRuntime>,
     intents: HashMap<String, ReceiverIntent>,
     pending: HashMap<String, PendingSub>,
-    quality: QualityController,
-    sources: Vec<AudioSource>,
+    mics: Vec<AudioSource>,
     outputs: Vec<OutputDevice>,
+    virtual_state: VirtualState,
+    virtual_device: Option<OutputDevice>,
+    virtual_deadline: Option<Instant>,
     local: LocalNetwork,
     revision: u64,
     notice: Option<LiveNotice>,
@@ -352,29 +407,34 @@ struct LiveNotice {
 
 struct PendingSub {
     peer_id: String,
+    kind: SourceKind,
     deadline: Instant,
     reply: Option<Reply>,
 }
 
 struct ReceiverIntent {
+    peer_id: String,
+    kind: SourceKind,
     sender_alias: String,
     source: String,
-    source_kind: String,
     last_session: Option<u32>,
     next_attempt: Instant,
 }
 
 struct BroadcastRuntime {
+    kind: SourceKind,
     session: u32,
     started_at_ms: u64,
     source: AudioSource,
-    _capture_stream: cpal::Stream,
+    capture: Option<CaptureGuard>,
     capture_error: Arc<Mutex<Option<String>>>,
     capture_peak: Arc<AtomicU32>,
     overflowed_samples: Arc<AtomicU64>,
     listeners: Arc<Mutex<Vec<ListenerEntry>>>,
     control: Arc<SenderControl>,
     sender: Option<JoinHandle<()>>,
+    quality: QualityController,
+    excludes_self: bool,
 }
 
 struct SenderControl {
@@ -407,6 +467,14 @@ struct ListenerEntry {
     report: Option<Feedback>,
 }
 
+type Outlet = Arc<Mutex<Option<rtrb::Producer<[f32; 2]>>>>;
+
+struct VirtualSink {
+    _stream: cpal::Stream,
+    name: String,
+    error: Arc<Mutex<Option<String>>>,
+}
+
 struct ReceiverRuntime {
     _playback_stream: cpal::Stream,
     playback: crate::audio::PlaybackInfo,
@@ -414,15 +482,18 @@ struct ReceiverRuntime {
     _underruns: Arc<AtomicU64>,
     error: Arc<Mutex<Option<String>>>,
     streams: Arc<Mutex<HashMap<String, Arc<Mutex<ReceiverStream>>>>>,
+    virtual_out: Outlet,
+    virtual_sink: Option<VirtualSink>,
     stop: Arc<AtomicBool>,
     mixer: Option<JoinHandle<()>>,
 }
 
 struct ReceiverStream {
+    key: String,
     sender_id: String,
     sender_alias: String,
+    kind: SourceKind,
     source: String,
-    source_kind: String,
     session: u32,
     address: SocketAddr,
     buffer: StreamBuffer,
@@ -430,6 +501,7 @@ struct ReceiverStream {
     bitrate_kbps: u32,
     last_packet: Instant,
     level: f32,
+    to_virtual: bool,
 }
 
 impl Coordinator {
@@ -440,13 +512,13 @@ impl Coordinator {
             self.local
         );
         self.probe_network();
+        self.restore();
         loop {
             if let Err(error) = self.drain_socket() {
                 log::debug!("socket read: {error}");
             }
             while let Ok(command) = self.command_rx.try_recv() {
                 if !self.handle_command(command) {
-                    self.shutdown();
                     return;
                 }
             }
@@ -463,6 +535,7 @@ impl Coordinator {
             if now >= self.next_network_refresh {
                 self.local = local_network();
                 self.next_network_refresh = now + Duration::from_secs(5);
+                self.settle_virtual(now);
             }
             if now >= self.next_scan {
                 self.scan_network();
@@ -486,38 +559,95 @@ impl Coordinator {
         }
     }
 
+    // 目覚めては 昨日の歌を また歌ふ
+    fn restore(&mut self) {
+        if self.settings.virtual_mic
+            && let Err(error) = virtual_mic::prepare()
+        {
+            log::warn!("virtual microphone unavailable: {error:#}");
+        }
+        self.detect_virtual();
+        if !self.settings.restore {
+            return;
+        }
+        let now = Instant::now();
+        for saved in self.settings.listen.clone() {
+            let Some(kind) = SourceKind::parse(&saved.kind) else {
+                continue;
+            };
+            self.intents.insert(
+                stream_key(&saved.peer_id, kind),
+                ReceiverIntent {
+                    peer_id: saved.peer_id,
+                    kind,
+                    sender_alias: saved.alias,
+                    source: saved.source,
+                    last_session: None,
+                    next_attempt: now,
+                },
+            );
+        }
+        for (kind, on) in [
+            (SourceKind::System, self.settings.system_on),
+            (SourceKind::Microphone, self.settings.mic_on),
+        ] {
+            if on && let Err(error) = self.start_stream(kind) {
+                self.set_notice("error", format!("{error:#}"));
+            }
+        }
+        self.publish();
+    }
+
     fn shutdown(&mut self) {
-        self.stop_broadcast(Some("本机已停止广播".to_owned()), false);
+        for kind in [SourceKind::System, SourceKind::Microphone] {
+            self.stop_stream(kind, Some(LOCAL_STOP.to_owned()), false);
+        }
         self.stop_receiver();
+        virtual_mic::release();
         self.publish();
         log::info!("session coordinator stopped");
     }
 
+    fn save(&self) {
+        if let Err(error) = self.settings.save(&self.settings_dir) {
+            log::warn!("could not save settings: {error:#}");
+        }
+    }
+
     fn handle_command(&mut self, command: Command) -> bool {
         match command {
-            Command::StartBroadcast { source_id, reply } => {
+            Command::StartStream { kind, reply } => {
                 let result = self
-                    .start_broadcast(&source_id)
+                    .start_stream(kind)
                     .map_err(|error| format!("{error:#}"));
-                if let Err(message) = &result {
+                if result.is_ok() {
+                    self.remember_stream(kind, true);
+                } else if let Err(message) = &result {
                     self.set_notice("error", message.clone());
                     self.publish();
                 }
                 let _ = reply.send(result);
             }
-            Command::StopBroadcast { reply } => {
-                self.stop_broadcast(Some("本机已停止广播".to_owned()), true);
+            Command::StopStream { kind, reply } => {
+                let kinds = match kind {
+                    Some(kind) => vec![kind],
+                    None => vec![SourceKind::System, SourceKind::Microphone],
+                };
+                for kind in kinds {
+                    self.stop_stream(kind, Some(LOCAL_STOP.to_owned()), true);
+                    self.remember_stream(kind, false);
+                }
                 let _ = reply.send(Ok(()));
             }
-            Command::Subscribe { peer_id, reply } => {
-                let result = self.begin_subscribe(&peer_id, reply);
+            Command::Subscribe { key, reply } => {
+                let result = self.begin_subscribe(&key, reply);
                 if let Err(message) = &result {
                     self.set_notice("error", message.clone());
                     self.publish();
                 }
             }
-            Command::Unsubscribe { sender_id, reply } => {
-                self.unsubscribe(&sender_id);
+            Command::Unsubscribe { key, reply } => {
+                self.unsubscribe(&key);
                 let _ = reply.send(Ok(()));
             }
             Command::SetAlias { alias, reply } => {
@@ -540,20 +670,24 @@ impl Coordinator {
                 }
                 let _ = reply.send(result);
             }
-            Command::SetSource { source_id, reply } => {
-                let result = if self.broadcast.is_some() {
-                    Err("广播中不能切换音源".to_owned())
-                } else if !self.sources.iter().any(|source| source.id == source_id) {
-                    Err("这个音源已经不可用".to_owned())
+            Command::SetMic { source_id, reply } => {
+                let result = if !self.mics.iter().any(|source| source.id == source_id) {
+                    Err("这个麦克风已经不可用".to_owned())
                 } else {
-                    self.settings.source_id = Some(source_id);
-                    self.settings
-                        .save(&self.settings_dir)
-                        .map_err(|error| format!("{error:#}"))
+                    self.settings.mic_id = Some(source_id);
+                    self.save();
+                    if self.stream(SourceKind::Microphone).is_some() {
+                        self.stop_stream(SourceKind::Microphone, None, false);
+                        self.start_stream(SourceKind::Microphone)
+                            .map_err(|error| format!("{error:#}"))
+                    } else {
+                        Ok(())
+                    }
                 };
                 if let Err(message) = &result {
                     self.set_notice("error", message.clone());
                 }
+                self.publish();
                 let _ = reply.send(result);
             }
             Command::SetOutput { output_id, reply } => {
@@ -575,6 +709,43 @@ impl Coordinator {
                 }
                 let _ = reply.send(result);
             }
+            Command::SetPrefs {
+                restore,
+                background,
+                reply,
+            } => {
+                if let Some(restore) = restore {
+                    self.settings.restore = restore;
+                }
+                if let Some(background) = background {
+                    self.settings.background = background;
+                }
+                self.save();
+                self.publish();
+                let _ = reply.send(Ok(()));
+            }
+            Command::SetVirtualMic { enabled, reply } => {
+                let result = self.set_virtual_mic(enabled);
+                self.publish();
+                let _ = reply.send(result);
+            }
+            Command::VirtualInstalled { result } => {
+                match result {
+                    Ok(()) => {
+                        self.virtual_state = VirtualState::Settling;
+                        self.virtual_deadline = Some(Instant::now() + VIRTUAL_SETTLE);
+                        self.detect_virtual();
+                    }
+                    Err(message) => {
+                        self.virtual_state = VirtualState::Failed;
+                        self.settings.virtual_mic = false;
+                        self.save();
+                        self.set_notice("error", message);
+                    }
+                }
+                self.sync_virtual_route();
+                self.publish();
+            }
             Command::RefreshDevices { reply } => {
                 self.refresh_devices();
                 let _ = reply.send(Ok(()));
@@ -591,27 +762,51 @@ impl Coordinator {
                 }
                 let _ = reply.send(result);
             }
-            Command::Shutdown => return false,
+            Command::Shutdown { reply } => {
+                self.shutdown();
+                let _ = reply.send(Ok(()));
+                return false;
+            }
         }
         true
     }
 
-    fn start_broadcast(&mut self, source_id: &str) -> Result<()> {
-        if self.broadcast.is_some() {
-            return Err(anyhow!("已经在广播"));
+    fn remember_stream(&mut self, kind: SourceKind, on: bool) {
+        match kind {
+            SourceKind::System => self.settings.system_on = on,
+            SourceKind::Microphone => self.settings.mic_on = on,
         }
-        if self.receiver.is_some() || !self.intents.is_empty() || !self.pending.is_empty() {
-            return Err(anyhow!("请先停止收听，再开始广播"));
+        self.save();
+    }
+
+    fn stream(&self, kind: SourceKind) -> Option<&BroadcastRuntime> {
+        self.broadcasts.iter().find(|runtime| runtime.kind == kind)
+    }
+
+    fn primary_stream(&self) -> Option<&BroadcastRuntime> {
+        self.stream(SourceKind::System)
+            .or_else(|| self.broadcasts.first())
+    }
+
+    fn start_stream(&mut self, kind: SourceKind) -> Result<()> {
+        if self.stream(kind).is_some() {
+            return Ok(());
         }
-        let source = self
-            .sources
-            .iter()
-            .find(|source| source.id == source_id)
-            .cloned()
-            .ok_or_else(|| anyhow!("音源不存在，请重新选择"))?;
+        let source = match kind {
+            SourceKind::System => system_source(),
+            SourceKind::Microphone => self
+                .settings
+                .mic_id
+                .as_ref()
+                .and_then(|id| self.mics.iter().find(|source| &source.id == id))
+                .or_else(|| self.mics.iter().find(|source| source.is_default))
+                .or_else(|| self.mics.first())
+                .cloned()
+                .ok_or_else(|| anyhow!("没有可用的麦克风"))?,
+        };
 
         let OpenCapture {
-            stream,
+            guard,
             feed,
             source: opened_source,
             sample_rate,
@@ -619,13 +814,13 @@ impl Coordinator {
             peak,
             overflowed_samples,
             error,
+            excludes_self,
         } = open_capture(&source)?;
         if let Some(message) = error.lock().unwrap().take() {
             return Err(anyhow!(message));
         }
 
         let session = random_session();
-        let started_at_ms = epoch_ms();
         let listeners = Arc::new(Mutex::new(Vec::<ListenerEntry>::new()));
         let control = Arc::new(SenderControl::new());
         let encoder = Encoder::new().context("could not initialise Opus encoder")?;
@@ -633,7 +828,7 @@ impl Coordinator {
         let listener_registry = Arc::clone(&listeners);
         let worker_control = Arc::clone(&control);
         let sender = thread::Builder::new()
-            .name("loco-encoder".to_owned())
+            .name(format!("loco-encoder-{}", kind.label()))
             .spawn(move || {
                 sender_loop(SenderJob {
                     feed,
@@ -648,32 +843,37 @@ impl Coordinator {
             })
             .context("could not start audio sender")?;
 
-        self.broadcast = Some(BroadcastRuntime {
+        self.broadcasts.push(BroadcastRuntime {
+            kind,
             session,
-            started_at_ms,
-            source: opened_source.clone(),
-            _capture_stream: stream,
+            started_at_ms: epoch_ms(),
+            source: opened_source,
+            capture: Some(guard),
             capture_error: error,
             capture_peak: peak,
             overflowed_samples,
             listeners,
             control,
             sender: Some(sender),
+            quality: QualityController::new(),
+            excludes_self,
         });
-        self.settings.source_id = Some(source_id.to_owned());
-        if let Err(error) = self.settings.save(&self.settings_dir) {
-            log::warn!("could not save source choice: {error}");
-        }
-        self.set_notice("info", format!("正在广播「{}」", opened_source.name));
+        self.broadcasts
+            .sort_by_key(|runtime| runtime.kind != SourceKind::System);
         self.announce_now();
         self.publish();
         Ok(())
     }
 
-    fn stop_broadcast(&mut self, reason: Option<String>, announce: bool) {
-        let Some(mut runtime) = self.broadcast.take() else {
+    fn stop_stream(&mut self, kind: SourceKind, reason: Option<String>, announce: bool) {
+        let Some(index) = self
+            .broadcasts
+            .iter()
+            .position(|runtime| runtime.kind == kind)
+        else {
             return;
         };
+        let mut runtime = self.broadcasts.remove(index);
         let ended = Control::Ended {
             session: runtime.session,
             reason: reason.clone().unwrap_or_else(|| "广播结束".to_owned()),
@@ -684,67 +884,86 @@ impl Coordinator {
             }
         }
         runtime.control.stop.store(true, Ordering::Release);
-        drop(runtime._capture_stream);
+        drop(runtime.capture.take());
         if let Some(sender) = runtime.sender.take() {
             let _ = sender.join();
         }
-        self.quality = QualityController::new();
         if announce {
             self.announce_now();
         }
         if let Some(reason) = reason
-            && reason != "本机已停止广播"
+            && reason != LOCAL_STOP
         {
             self.set_notice("error", reason);
         }
         self.publish();
     }
 
-    fn begin_subscribe(&mut self, peer_id: &str, reply: Reply) -> Result<(), String> {
-        if self.intents.contains_key(peer_id) {
-            let _ = reply.send(Ok(()));
-            return Ok(());
+    fn resolve_key(&self, key: &str) -> Option<(String, SourceKind)> {
+        if let Some((peer, kind)) = key.split_once('#') {
+            return Some((peer.to_owned(), SourceKind::parse(kind)?));
         }
-        let outcome: Result<SocketAddr, String> = (|| {
-            if self.broadcast.is_some() {
-                return Err("广播中不能同时收听".to_owned());
-            }
-            if self.pending.contains_key(peer_id) {
+        let peer = self.peers.get(key)?;
+        let kind = SourceKind::parse(&peer.primary()?.source_kind)?;
+        Some((key.to_owned(), kind))
+    }
+
+    fn begin_subscribe(&mut self, key: &str, reply: Reply) -> Result<(), String> {
+        let outcome: Result<(String, SourceKind, SocketAddr, u32), String> = (|| {
+            let (peer_id, kind) = self
+                .resolve_key(key)
+                .ok_or_else(|| "这台设备当前没有广播".to_owned())?;
+            let key = stream_key(&peer_id, kind);
+            if self.pending.contains_key(&key) {
                 return Err("正在连接这台设备".to_owned());
             }
-            if self.intents.len() >= 8 {
+            if !self.intents.contains_key(&key) && self.intents.len() >= MAX_INTENTS {
                 return Err("一次最多收听 8 路音频".to_owned());
             }
             let peer = self
                 .peers
-                .get(peer_id)
+                .get(&peer_id)
                 .ok_or_else(|| "设备已离线".to_owned())?;
-            if peer.broadcast.is_none() {
-                return Err("这台设备当前没有广播".to_owned());
-            }
-            Ok(SocketAddr::new(peer.address.ip(), peer.port))
+            let stream = peer
+                .stream(kind.label())
+                .ok_or_else(|| "这台设备当前没有广播".to_owned())?;
+            Ok((
+                peer_id.clone(),
+                kind,
+                SocketAddr::new(peer.address.ip(), peer.port),
+                stream.session,
+            ))
         })();
-        let address = match outcome {
-            Ok(address) => address,
+        let (peer_id, kind, address, session) = match outcome {
+            Ok(target) => target,
             Err(message) => {
                 let _ = reply.send(Err(message.clone()));
                 return Err(message);
             }
         };
+        let key = stream_key(&peer_id, kind);
+        let already = self.receiver.as_ref().is_some_and(|runtime| {
+            runtime
+                .streams
+                .lock()
+                .unwrap()
+                .get(&key)
+                .is_some_and(|stream| stream.lock().unwrap().session == session)
+        });
+        if already {
+            let _ = reply.send(Ok(()));
+            return Ok(());
+        }
         if let Err(message) = self.ensure_receiver() {
             let _ = reply.send(Err(message.clone()));
             return Err(message);
         }
-        let control = Control::Subscribe(Subscribe {
-            id: self.settings.id.clone(),
-            alias: self.settings.alias.clone(),
-            platform: std::env::consts::OS.to_owned(),
-        });
-        self.send_control(address, &control);
+        self.send_subscribe(address, session);
         self.pending.insert(
-            peer_id.to_owned(),
+            key,
             PendingSub {
-                peer_id: peer_id.to_owned(),
+                peer_id,
+                kind,
                 deadline: Instant::now() + PENDING_TTL,
                 reply: Some(reply),
             },
@@ -753,29 +972,90 @@ impl Coordinator {
         Ok(())
     }
 
-    fn unsubscribe(&mut self, sender_id: &str) {
-        self.intents.remove(sender_id);
-        if let Some(pending) = self.pending.remove(sender_id)
-            && let Some(reply) = pending.reply
-        {
-            let _ = reply.send(Err("已取消收听".to_owned()));
-        }
-        if let Some(runtime) = self.receiver.as_ref() {
-            let removed = runtime.streams.lock().unwrap().remove(sender_id);
-            if let Some(stream) = removed {
-                let stream = stream.lock().unwrap();
-                self.send_control(
-                    stream.address,
-                    &Control::Unsubscribe {
-                        session: stream.session,
-                    },
-                );
+    fn send_subscribe(&self, address: SocketAddr, session: u32) {
+        let control = Control::Subscribe(Subscribe {
+            id: self.settings.id.clone(),
+            alias: self.settings.alias.clone(),
+            platform: std::env::consts::OS.to_owned(),
+            session: Some(session),
+        });
+        self.send_control(address, &control);
+    }
+
+    fn unsubscribe(&mut self, key: &str) {
+        let keys = if key.contains('#') {
+            vec![key.to_owned()]
+        } else {
+            let prefix = format!("{key}#");
+            self.intents
+                .keys()
+                .chain(self.pending.keys())
+                .filter(|candidate| candidate.starts_with(&prefix))
+                .cloned()
+                .collect::<HashSet<_>>()
+                .into_iter()
+                .collect()
+        };
+        for key in keys {
+            self.intents.remove(&key);
+            if let Some(pending) = self.pending.remove(&key)
+                && let Some(reply) = pending.reply
+            {
+                let _ = reply.send(Err("已取消收听".to_owned()));
             }
+            if let Some(runtime) = self.receiver.as_ref() {
+                let removed = runtime.streams.lock().unwrap().remove(&key);
+                if let Some(stream) = removed {
+                    let stream = stream.lock().unwrap();
+                    self.send_control(
+                        stream.address,
+                        &Control::Unsubscribe {
+                            session: stream.session,
+                        },
+                    );
+                }
+            }
+            self.forget_listen(&key);
         }
         if self.intents.is_empty() && self.pending.is_empty() {
             self.stop_receiver();
+        } else {
+            self.sync_virtual_route();
         }
         self.publish();
+    }
+
+    fn remember_listen(&mut self, peer_id: &str, kind: SourceKind, alias: &str, source: &str) {
+        let saved = SavedListen {
+            peer_id: peer_id.to_owned(),
+            kind: kind.label().to_owned(),
+            alias: alias.to_owned(),
+            source: source.to_owned(),
+        };
+        let existing = self
+            .settings
+            .listen
+            .iter_mut()
+            .find(|item| item.peer_id == saved.peer_id && item.kind == saved.kind);
+        match existing {
+            Some(item) if *item == saved => return,
+            Some(item) => *item = saved,
+            None => self.settings.listen.push(saved),
+        }
+        self.save();
+    }
+
+    fn forget_listen(&mut self, key: &str) {
+        let Some((peer_id, kind)) = key.split_once('#') else {
+            return;
+        };
+        let before = self.settings.listen.len();
+        self.settings
+            .listen
+            .retain(|item| !(item.peer_id == peer_id && item.kind == kind));
+        if self.settings.listen.len() != before {
+            self.save();
+        }
     }
 
     fn stop_receiver(&mut self) {
@@ -802,13 +1082,15 @@ impl Coordinator {
         } = PlaybackSink::open(self.settings.output_id.as_deref())
             .map_err(|error| format!("输出设备无法打开：{error}，请在设置中更换"))?;
         let streams = Arc::new(Mutex::new(HashMap::new()));
+        let virtual_out: Outlet = Arc::new(Mutex::new(None));
         let stop = Arc::new(AtomicBool::new(false));
         let mixer = {
             let streams = Arc::clone(&streams);
+            let virtual_out = Arc::clone(&virtual_out);
             let stop = Arc::clone(&stop);
             thread::Builder::new()
                 .name("loco-mixer".to_owned())
-                .spawn(move || mixer_loop(streams, feed, stop))
+                .spawn(move || mixer_loop(streams, feed, virtual_out, stop))
                 .map_err(|error| format!("混音线程无法启动：{error}"))?
         };
         self.receiver = Some(ReceiverRuntime {
@@ -818,29 +1100,161 @@ impl Coordinator {
             _underruns: underrun_samples,
             error,
             streams,
+            virtual_out,
+            virtual_sink: None,
             stop,
             mixer: Some(mixer),
         });
         Ok(())
     }
 
+    fn virtual_ready(&self) -> bool {
+        self.settings.virtual_mic
+            && self.virtual_state == VirtualState::Ready
+            && self.virtual_device.is_some()
+    }
+
+    // 声ひとつ 仮の喉へと 分け入りぬ
+    fn sync_virtual_route(&mut self) {
+        let ready = self.virtual_ready();
+        let candidates = virtual_mic::candidates(&self.outputs);
+        let Some(runtime) = self.receiver.as_mut() else {
+            return;
+        };
+        let wants = ready
+            && runtime
+                .streams
+                .lock()
+                .unwrap()
+                .values()
+                .any(|stream| stream.lock().unwrap().kind == SourceKind::Microphone);
+        let mut failed = false;
+        if wants && runtime.virtual_sink.is_none() {
+            for device in &candidates {
+                match PlaybackSink::open(Some(&device.id)) {
+                    Ok(sink) => {
+                        *runtime.virtual_out.lock().unwrap() = Some(sink.feed);
+                        runtime.virtual_sink = Some(VirtualSink {
+                            _stream: sink.stream,
+                            name: sink.info.device_name,
+                            error: sink.error,
+                        });
+                        break;
+                    }
+                    Err(error) => {
+                        log::warn!(
+                            "virtual microphone output {} failed: {error:#}",
+                            device.name
+                        );
+                    }
+                }
+            }
+            failed = runtime.virtual_sink.is_none();
+        } else if !wants && runtime.virtual_sink.is_some() {
+            *runtime.virtual_out.lock().unwrap() = None;
+            runtime.virtual_sink = None;
+        }
+        let routed = runtime.virtual_sink.is_some();
+        for stream in runtime.streams.lock().unwrap().values() {
+            let mut stream = stream.lock().unwrap();
+            stream.to_virtual = routed && stream.kind == SourceKind::Microphone;
+        }
+        if failed {
+            self.set_notice(
+                "warning",
+                format!("{} 被占用，麦克风改由扬声器播放", virtual_mic::PROVIDER),
+            );
+        }
+    }
+
+    fn set_virtual_mic(&mut self, enabled: bool) -> Result<(), String> {
+        if !virtual_mic::supported() {
+            return Err("这台设备不支持虚拟麦克风".to_owned());
+        }
+        self.settings.virtual_mic = enabled;
+        self.save();
+        if enabled {
+            self.detect_virtual();
+            if self.virtual_device.is_none()
+                && !matches!(
+                    self.virtual_state,
+                    VirtualState::Installing | VirtualState::Settling
+                )
+            {
+                self.virtual_state = VirtualState::Installing;
+                let commands = self.commands.clone();
+                thread::Builder::new()
+                    .name("loco-virtual-mic".to_owned())
+                    .spawn(move || {
+                        let result = virtual_mic::install().map_err(|error| format!("{error:#}"));
+                        let _ = commands.send(Command::VirtualInstalled { result });
+                    })
+                    .map_err(|error| format!("{error}"))?;
+            }
+        } else {
+            virtual_mic::release();
+            self.detect_virtual();
+        }
+        self.mics = microphones(&self.settings);
+        self.sync_virtual_route();
+        Ok(())
+    }
+
+    fn detect_virtual(&mut self) {
+        self.outputs = list_output_devices();
+        self.virtual_device = virtual_mic::find(&self.outputs);
+        if self.virtual_device.is_some() {
+            self.virtual_state = VirtualState::Ready;
+            self.virtual_deadline = None;
+        } else if !matches!(
+            self.virtual_state,
+            VirtualState::Installing | VirtualState::Settling | VirtualState::Restart
+        ) {
+            self.virtual_state = VirtualState::Missing;
+        }
+    }
+
+    fn settle_virtual(&mut self, now: Instant) {
+        if self.virtual_state != VirtualState::Settling {
+            return;
+        }
+        self.detect_virtual();
+        if self.virtual_state == VirtualState::Settling
+            && self
+                .virtual_deadline
+                .is_some_and(|deadline| now >= deadline)
+        {
+            self.virtual_state = VirtualState::Restart;
+        }
+        self.mics = microphones(&self.settings);
+        self.sync_virtual_route();
+        self.publish_soon();
+    }
+
     fn reconcile_receiver(&mut self, now: Instant) {
         if self.intents.is_empty() {
             return;
         }
-        let sender_ids = self.intents.keys().cloned().collect::<Vec<_>>();
-        for sender_id in sender_ids {
+        let keys = self.intents.keys().cloned().collect::<Vec<_>>();
+        for key in keys {
+            let Some((peer_id, kind)) = self
+                .intents
+                .get(&key)
+                .map(|intent| (intent.peer_id.clone(), intent.kind))
+            else {
+                continue;
+            };
             let active_session = self.receiver.as_ref().and_then(|runtime| {
                 runtime.streams.lock().ok().and_then(|streams| {
                     streams
-                        .get(&sender_id)
+                        .get(&key)
                         .map(|stream| stream.lock().unwrap().session)
                 })
             });
-            let peer_state = self.peers.get(&sender_id).map(|peer| {
+            let peer_state = self.peers.get(&peer_id).map(|peer| {
                 (
                     SocketAddr::new(peer.address.ip(), peer.port),
-                    peer.broadcast.as_ref().map(|broadcast| broadcast.session),
+                    peer.stream(kind.label()).map(|stream| stream.session),
                 )
             });
 
@@ -851,10 +1265,10 @@ impl Coordinator {
                     || announced.is_some_and(|session| Some(session) != active_session))
             {
                 if let Some(runtime) = self.receiver.as_ref() {
-                    runtime.streams.lock().unwrap().remove(&sender_id);
+                    runtime.streams.lock().unwrap().remove(&key);
                 }
                 dropped_active = true;
-                if let Some(intent) = self.intents.get_mut(&sender_id) {
+                if let Some(intent) = self.intents.get_mut(&key) {
                     intent.next_attempt = if announced.is_some() {
                         now
                     } else {
@@ -863,7 +1277,8 @@ impl Coordinator {
                 }
             }
             if dropped_active {
-                log::debug!("receiver stream for {sender_id} is stale; returning to standby");
+                log::debug!("receiver stream {key} is stale; returning to standby");
+                self.sync_virtual_route();
                 self.publish_soon();
             }
 
@@ -871,7 +1286,7 @@ impl Coordinator {
             let Some((address, Some(session))) = peer_state else {
                 continue;
             };
-            if let Some(intent) = self.intents.get_mut(&sender_id)
+            if let Some(intent) = self.intents.get_mut(&key)
                 && intent.last_session != Some(session)
             {
                 intent.last_session = Some(session);
@@ -880,50 +1295,47 @@ impl Coordinator {
             let ready = now
                 >= self
                     .intents
-                    .get(&sender_id)
+                    .get(&key)
                     .map(|intent| intent.next_attempt)
                     .unwrap_or(now);
-            if !active_now && ready && !self.pending.contains_key(&sender_id) {
-                self.auto_subscribe(&sender_id, address, session, now);
+            if !active_now && ready && !self.pending.contains_key(&key) {
+                self.auto_subscribe(&key, address, session, now);
             }
         }
     }
 
-    fn auto_subscribe(&mut self, sender_id: &str, address: SocketAddr, session: u32, now: Instant) {
-        if self.broadcast.is_some() {
-            return;
-        }
+    fn auto_subscribe(&mut self, key: &str, address: SocketAddr, session: u32, now: Instant) {
         if let Err(error) = self.ensure_receiver() {
-            if let Some(intent) = self.intents.get_mut(sender_id) {
+            if let Some(intent) = self.intents.get_mut(key) {
                 intent.next_attempt = now + Duration::from_secs(10);
             }
             self.set_notice("warning", error);
             return;
         }
-        let subscribe = Control::Subscribe(Subscribe {
-            id: self.settings.id.clone(),
-            alias: self.settings.alias.clone(),
-            platform: std::env::consts::OS.to_owned(),
-        });
-        self.send_control(address, &subscribe);
-        if let Some(intent) = self.intents.get_mut(sender_id) {
-            intent.last_session = Some(session);
-            intent.next_attempt = now + AUTO_RETRY;
-        }
+        self.send_subscribe(address, session);
+        let Some(intent) = self.intents.get_mut(key) else {
+            return;
+        };
+        intent.last_session = Some(session);
+        intent.next_attempt = now + AUTO_RETRY;
+        let (peer_id, kind) = (intent.peer_id.clone(), intent.kind);
         self.pending.insert(
-            sender_id.to_owned(),
+            key.to_owned(),
             PendingSub {
-                peer_id: sender_id.to_owned(),
+                peer_id,
+                kind,
                 deadline: now + PENDING_TTL,
                 reply: None,
             },
         );
-        log::debug!("attempting automatic resubscribe to {sender_id}");
+        log::debug!("attempting automatic resubscribe to {key}");
         self.publish_soon();
     }
 
     fn handle_subscribed(&mut self, subscribed: Subscribed, from: SocketAddr) {
-        let Some(pending) = self.pending.remove(&subscribed.source_id) else {
+        let kind = SourceKind::parse(&subscribed.source_kind).unwrap_or(SourceKind::System);
+        let key = stream_key(&subscribed.source_id, kind);
+        let Some(pending) = self.pending.remove(&key) else {
             // A late acknowledgement after timeout, or a spoofed reply: there
             // is no listener intent to attach it to.
             log::debug!("unsolicited subscribed from {from}");
@@ -940,12 +1352,12 @@ impl Coordinator {
             Ok(decoder) => {
                 let sender_alias = subscribed.source_alias;
                 let source = subscribed.source;
-                let source_kind = subscribed.source_kind;
                 let stream = ReceiverStream {
+                    key: key.clone(),
                     sender_id: pending.peer_id.clone(),
                     sender_alias: sender_alias.clone(),
+                    kind: pending.kind,
                     source: source.clone(),
-                    source_kind: source_kind.clone(),
                     session: subscribed.session,
                     address: from,
                     buffer: StreamBuffer::new(now),
@@ -953,29 +1365,33 @@ impl Coordinator {
                     bitrate_kbps: 112,
                     last_packet: now,
                     level: 0.0,
+                    to_virtual: false,
                 };
                 runtime
                     .streams
                     .lock()
                     .unwrap()
-                    .insert(pending.peer_id.clone(), Arc::new(Mutex::new(stream)));
+                    .insert(key.clone(), Arc::new(Mutex::new(stream)));
                 self.intents.insert(
-                    pending.peer_id.clone(),
+                    key,
                     ReceiverIntent {
-                        sender_alias,
-                        source,
-                        source_kind,
+                        peer_id: pending.peer_id.clone(),
+                        kind: pending.kind,
+                        sender_alias: sender_alias.clone(),
+                        source: source.clone(),
                         last_session: Some(subscribed.session),
                         next_attempt: now + AUTO_RETRY,
                     },
                 );
+                self.remember_listen(&pending.peer_id, pending.kind, &sender_alias, &source);
+                self.sync_virtual_route();
                 if let Some(reply) = pending.reply {
                     let _ = reply.send(Ok(()));
                 }
             }
             Err(error) => {
                 let message = format!("Opus 解码器初始化失败：{error}");
-                if let Some(intent) = self.intents.get_mut(&pending.peer_id) {
+                if let Some(intent) = self.intents.get_mut(&key) {
                     intent.next_attempt = now + AUTO_RETRY;
                 }
                 if let Some(reply) = pending.reply {
@@ -1025,14 +1441,14 @@ impl Coordinator {
         let target = {
             let streams = runtime.streams.lock().unwrap();
             streams
-                .iter()
-                .find(|(_, stream)| {
+                .values()
+                .find(|stream| {
                     let stream = stream.lock().unwrap();
                     stream.session == packet.session && stream.address.ip() == from.ip()
                 })
-                .map(|(id, stream)| (id.clone(), Arc::clone(stream)))
+                .map(Arc::clone)
         };
-        let Some((_, stream)) = target else {
+        let Some(stream) = target else {
             return;
         };
         let mut stream = stream.lock().unwrap();
@@ -1079,8 +1495,10 @@ impl Coordinator {
             Control::Subscribe(subscribe) => self.accept_subscriber(subscribe, from),
             Control::Subscribed(subscribed) => self.handle_subscribed(subscribed, from),
             Control::Unsubscribe { session } => {
-                if let Some(runtime) = self.broadcast.as_ref()
-                    && runtime.session == session
+                if let Some(runtime) = self
+                    .broadcasts
+                    .iter()
+                    .find(|runtime| runtime.session == session)
                 {
                     runtime
                         .listeners
@@ -1091,33 +1509,24 @@ impl Coordinator {
                 }
             }
             Control::Ended { session, reason } => {
-                let key = self.receiver.as_ref().and_then(|runtime| {
-                    runtime
-                        .streams
-                        .lock()
-                        .unwrap()
+                let removed = self.receiver.as_ref().and_then(|runtime| {
+                    let mut streams = runtime.streams.lock().unwrap();
+                    let key = streams
                         .iter()
                         .find(|(_, stream)| {
                             let stream = stream.lock().unwrap();
                             stream.session == session && stream.address.ip() == from.ip()
                         })
-                        .map(|(id, _)| id.clone())
+                        .map(|(key, _)| key.clone())?;
+                    streams.remove(&key).map(|stream| (key, stream))
                 });
-                if let Some(key) = key {
-                    let removed = self
-                        .receiver
-                        .as_ref()
-                        .and_then(|runtime| runtime.streams.lock().unwrap().remove(&key));
-                    if let Some(stream) = removed {
-                        let alias = stream.lock().unwrap().sender_alias.clone();
-                        if let Some(intent) = self.intents.get_mut(&key) {
-                            intent.next_attempt = Instant::now() + AUTO_RETRY;
-                        }
-                        self.set_notice(
-                            "info",
-                            format!("{alias} 已停止广播，继续守听（{reason}）"),
-                        );
+                if let Some((key, stream)) = removed {
+                    let alias = stream.lock().unwrap().sender_alias.clone();
+                    if let Some(intent) = self.intents.get_mut(&key) {
+                        intent.next_attempt = Instant::now() + AUTO_RETRY;
                     }
+                    self.set_notice("info", format!("{alias} 已停止广播（{reason}）"));
+                    self.sync_virtual_route();
                     self.publish_soon();
                 }
             }
@@ -1126,11 +1535,18 @@ impl Coordinator {
     }
 
     fn accept_subscriber(&mut self, subscribe: Subscribe, from: SocketAddr) {
-        let Some(runtime) = self.broadcast.as_ref() else {
+        let runtime = match subscribe.session {
+            Some(session) => self
+                .broadcasts
+                .iter()
+                .find(|runtime| runtime.session == session),
+            None => self.primary_stream(),
+        };
+        let Some(runtime) = runtime else {
             self.send_control(
                 from,
                 &Control::Ended {
-                    session: 0,
+                    session: subscribe.session.unwrap_or(0),
                     reason: "这台设备没有在广播".to_owned(),
                 },
             );
@@ -1175,7 +1591,7 @@ impl Coordinator {
             source_id: self.settings.id.clone(),
             source_alias: self.settings.alias.clone(),
             source: runtime.source.name.clone(),
-            source_kind: source_kind_label(runtime.source.kind).to_owned(),
+            source_kind: runtime.kind.label().to_owned(),
             sample_rate: crate::protocol::SAMPLE_RATE,
             channels: CHANNELS as u16,
             frame_ms: crate::protocol::FRAME_MS as u16,
@@ -1186,16 +1602,15 @@ impl Coordinator {
     }
 
     fn handle_feedback(&mut self, feedback: Feedback, from: SocketAddr) {
-        let Some(runtime) = self.broadcast.as_ref() else {
+        let Some(runtime) = self
+            .broadcasts
+            .iter_mut()
+            .find(|runtime| runtime.session == feedback.session)
+        else {
             return;
         };
-        if feedback.session != runtime.session {
-            return;
-        }
-        let listeners_handle = Arc::clone(&runtime.listeners);
-        let control = Arc::clone(&runtime.control);
         let reports = {
-            let mut listeners = listeners_handle.lock().unwrap();
+            let mut listeners = runtime.listeners.lock().unwrap();
             let Some(listener) = listeners
                 .iter_mut()
                 .find(|listener| listener.address.ip() == from.ip())
@@ -1209,11 +1624,13 @@ impl Coordinator {
                 .filter_map(|listener| listener.report.clone())
                 .collect::<Vec<_>>()
         };
-        let quality = self.quality.observe(&reports);
-        control
+        let quality = runtime.quality.observe(&reports);
+        runtime
+            .control
             .bitrate_kbps
             .store(quality.bitrate_kbps, Ordering::Relaxed);
-        control
+        runtime
+            .control
             .loss_x100
             .store((quality.loss_pct * 100.0) as u32, Ordering::Relaxed);
     }
@@ -1314,24 +1731,29 @@ impl Coordinator {
             .ok()
             .and_then(|name| name.into_string().ok())
             .unwrap_or_else(|| "unknown".to_owned());
-        let broadcast = self.broadcast.as_ref().map(|runtime| BroadcastAnnounce {
-            session: runtime.session,
-            source: runtime.source.name.clone(),
-            source_kind: source_kind_label(runtime.source.kind).to_owned(),
-            started_at_ms: runtime.started_at_ms,
-            listeners: runtime
-                .listeners
-                .lock()
-                .map(|listeners| listeners.len() as u32)
-                .unwrap_or(0),
-            codec: CodecAnnounce::default(),
-        });
+        let streams = self
+            .broadcasts
+            .iter()
+            .map(|runtime| BroadcastAnnounce {
+                session: runtime.session,
+                source: runtime.source.name.clone(),
+                source_kind: runtime.kind.label().to_owned(),
+                started_at_ms: runtime.started_at_ms,
+                listeners: runtime
+                    .listeners
+                    .lock()
+                    .map(|listeners| listeners.len() as u32)
+                    .unwrap_or(0),
+                codec: CodecAnnounce::default(),
+            })
+            .collect();
         let mut announce = Announce::new(
             self.settings.id.clone(),
             self.settings.alias.clone(),
             std::env::consts::OS,
-            broadcast,
-        );
+            None,
+        )
+        .with_streams(streams);
         announce.hostname = hostname;
         announce.port = self.port;
         announce
@@ -1362,13 +1784,13 @@ impl Coordinator {
             .pending
             .iter()
             .filter(|(_, pending)| pending.deadline <= now)
-            .map(|(id, _)| id.clone())
+            .map(|(key, _)| key.clone())
             .collect::<Vec<_>>();
-        for id in expired {
-            if let Some(pending) = self.pending.remove(&id) {
+        for key in expired {
+            if let Some(pending) = self.pending.remove(&key) {
                 if let Some(reply) = pending.reply {
                     let _ = reply.send(Err("对方没有回应，请确认两台设备在同一局域网".to_owned()));
-                } else if let Some(intent) = self.intents.get_mut(&id) {
+                } else if let Some(intent) = self.intents.get_mut(&key) {
                     intent.next_attempt = now + AUTO_RETRY;
                 }
             }
@@ -1379,7 +1801,7 @@ impl Coordinator {
                 .receiver
                 .as_ref()
                 .is_some_and(|runtime| runtime.streams.lock().unwrap().is_empty());
-        if unused_receiver && self.broadcast.is_none() {
+        if unused_receiver {
             self.stop_receiver();
         }
     }
@@ -1387,19 +1809,18 @@ impl Coordinator {
     fn prune_peers(&mut self, now: Instant) {
         self.peers
             .retain(|_, peer| now.saturating_duration_since(peer.last_seen) < PEER_TTL);
-        let _ = now;
     }
 
     fn reap_stale_listeners(&mut self, now: Instant) {
         let mut changed = false;
-        if let Some(runtime) = self.broadcast.as_ref()
-            && let Ok(mut listeners) = runtime.listeners.lock()
-        {
-            let before = listeners.len();
-            listeners.retain(|listener| {
-                now.saturating_duration_since(listener.last_seen) < LISTENER_TTL
-            });
-            changed = listeners.len() != before;
+        for runtime in &self.broadcasts {
+            if let Ok(mut listeners) = runtime.listeners.lock() {
+                let before = listeners.len();
+                listeners.retain(|listener| {
+                    now.saturating_duration_since(listener.last_seen) < LISTENER_TTL
+                });
+                changed |= listeners.len() != before;
+            }
         }
         if changed {
             self.announce_now();
@@ -1407,16 +1828,36 @@ impl Coordinator {
     }
 
     fn check_health(&mut self) {
-        let capture_error = self.broadcast.as_ref().and_then(|runtime| {
+        let failed = self
+            .broadcasts
+            .iter()
+            .filter_map(|runtime| {
+                runtime
+                    .capture_error
+                    .lock()
+                    .ok()
+                    .and_then(|mut slot| slot.take())
+                    .map(|error| (runtime.kind, error))
+            })
+            .collect::<Vec<_>>();
+        for (kind, error) in failed {
+            log::warn!("{} capture stopped: {error}", kind.label());
+            self.stop_stream(kind, Some(format!("采集已中断：{error}")), true);
+        }
+        let virtual_error = self.receiver.as_ref().and_then(|runtime| {
             runtime
-                .capture_error
-                .lock()
-                .ok()
-                .and_then(|mut slot| slot.take())
+                .virtual_sink
+                .as_ref()
+                .and_then(|sink| sink.error.lock().ok().and_then(|mut slot| slot.take()))
         });
-        if let Some(error) = capture_error {
-            self.set_notice("error", format!("采集已中断：{error}"));
-            self.stop_broadcast(Some("采集设备断开，广播已停止".to_owned()), true);
+        if let Some(error) = virtual_error {
+            log::warn!("virtual microphone output stopped: {error}");
+            if let Some(runtime) = self.receiver.as_mut() {
+                *runtime.virtual_out.lock().unwrap() = None;
+                runtime.virtual_sink = None;
+            }
+            self.detect_virtual();
+            self.sync_virtual_route();
         }
         let playback_error = self
             .receiver
@@ -1435,14 +1876,15 @@ impl Coordinator {
     }
 
     fn refresh_devices(&mut self) {
-        self.sources = list_sources();
-        self.outputs = list_output_devices();
-        if !self
-            .sources
-            .iter()
-            .any(|source| Some(&source.id) == self.settings.source_id.as_ref())
+        self.mics = microphones(&self.settings);
+        self.detect_virtual();
+        if self
+            .settings
+            .mic_id
+            .as_ref()
+            .is_some_and(|id| !self.mics.iter().any(|source| &source.id == id))
         {
-            self.settings.source_id = self.sources.first().map(|source| source.id.clone());
+            self.settings.mic_id = None;
         }
         if self
             .settings
@@ -1452,9 +1894,8 @@ impl Coordinator {
         {
             self.settings.output_id = None;
         }
-        if let Err(error) = self.settings.save(&self.settings_dir) {
-            log::warn!("could not save refreshed device choices: {error}");
-        }
+        self.save();
+        self.sync_virtual_route();
         self.publish_soon();
     }
 
@@ -1478,6 +1919,11 @@ impl Coordinator {
             .and_then(|name| name.into_string().ok())
             .unwrap_or_else(|| "unknown".to_owned());
         let now = Instant::now();
+        let listened = self
+            .intents
+            .values()
+            .map(|intent| intent.peer_id.clone())
+            .collect::<HashSet<_>>();
         let mut peers = self
             .peers
             .values()
@@ -1488,91 +1934,58 @@ impl Coordinator {
                 platform: peer.platform.clone(),
                 address: peer.address.ip().to_string(),
                 age_ms: now.saturating_duration_since(peer.last_seen).as_millis() as u64,
-                is_broadcasting: peer.broadcast.is_some(),
-                broadcast: peer.broadcast.as_ref().map(|broadcast| BroadcastView {
-                    session: broadcast.session,
-                    source: broadcast.source.clone(),
-                    source_kind: broadcast.source_kind.clone(),
-                    started_at_ms: broadcast.started_at_ms,
-                    listeners: broadcast.listeners,
-                    codec: broadcast.codec.clone(),
-                }),
-                is_listening: self.intents.contains_key(&peer.id),
+                streams: peer
+                    .streams
+                    .iter()
+                    .map(BroadcastView::from_announce)
+                    .collect(),
+                is_listening: listened.contains(&peer.id),
             })
             .collect::<Vec<_>>();
         peers.sort_by(|left, right| {
-            right
-                .is_broadcasting
-                .cmp(&left.is_broadcasting)
+            left.streams
+                .is_empty()
+                .cmp(&right.streams.is_empty())
                 .then_with(|| left.alias.to_lowercase().cmp(&right.alias.to_lowercase()))
         });
 
-        let broadcast = self.broadcast.as_ref().map(|runtime| {
-            let listeners = runtime
-                .listeners
-                .lock()
-                .map(|listeners| {
-                    listeners
-                        .iter()
-                        .map(|listener| {
-                            let loss = listener
-                                .report
-                                .as_ref()
-                                .map(|report| {
-                                    let total = report.received + report.lost;
-                                    if total == 0 {
-                                        0.0
-                                    } else {
-                                        report.lost as f64 / total as f64 * 100.0
-                                    }
-                                })
-                                .unwrap_or(0.0);
-                            ListenerView {
-                                alias: listener.alias.clone(),
-                                id: listener.id.clone(),
-                                address: listener.address.ip().to_string(),
-                                connected_ms: now
-                                    .saturating_duration_since(listener.joined_at)
-                                    .as_millis()
-                                    as u64,
-                                buffer_ms: listener
-                                    .report
-                                    .as_ref()
-                                    .map(|report| report.buffer_ms)
-                                    .unwrap_or(0),
-                                jitter_ms: listener
-                                    .report
-                                    .as_ref()
-                                    .map(|report| report.jitter_us as f64 / 1_000.0)
-                                    .unwrap_or(0.0),
-                                loss_pct: loss,
-                                reported: listener.report.is_some(),
-                            }
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
-            let quality = self.quality.state();
-            let level = f32::from_bits(runtime.capture_peak.swap(0, Ordering::Relaxed));
-            let _ = runtime.overflowed_samples.load(Ordering::Relaxed);
-            BroadcastOwnView {
-                session: runtime.session,
-                source: runtime.source.name.clone(),
-                source_kind: source_kind_label(runtime.source.kind).to_owned(),
-                started_at_ms: runtime.started_at_ms,
-                listeners,
-                quality: SendQualityView {
-                    mode: "auto".to_owned(),
-                    tier: quality_tier_key(quality.tier).to_owned(),
-                    tier_label: quality.tier.label().to_owned(),
-                    bitrate_kbps: quality.bitrate_kbps,
-                    loss_pct: quality.loss_pct,
-                    jitter_ms: quality.jitter_ms,
-                },
-                level,
-                packets_sent: runtime.control.packets_sent.load(Ordering::Relaxed),
-            }
-        });
+        let broadcasts = self
+            .broadcasts
+            .iter()
+            .map(|runtime| {
+                let listeners = runtime
+                    .listeners
+                    .lock()
+                    .map(|listeners| {
+                        listeners
+                            .iter()
+                            .map(|listener| listener_view(listener, now))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let quality = runtime.quality.state();
+                let level = f32::from_bits(runtime.capture_peak.swap(0, Ordering::Relaxed));
+                let _ = runtime.overflowed_samples.load(Ordering::Relaxed);
+                BroadcastOwnView {
+                    session: runtime.session,
+                    kind: runtime.kind.label().to_owned(),
+                    source: runtime.source.name.clone(),
+                    started_at_ms: runtime.started_at_ms,
+                    listeners,
+                    quality: SendQualityView {
+                        mode: "auto".to_owned(),
+                        tier: quality_tier_key(quality.tier).to_owned(),
+                        tier_label: quality.tier.label().to_owned(),
+                        bitrate_kbps: quality.bitrate_kbps,
+                        loss_pct: quality.loss_pct,
+                        jitter_ms: quality.jitter_ms,
+                    },
+                    level,
+                    packets_sent: runtime.control.packets_sent.load(Ordering::Relaxed),
+                    excludes_self: runtime.excludes_self,
+                }
+            })
+            .collect();
 
         let output_name = self
             .receiver
@@ -1586,8 +1999,13 @@ impl Coordinator {
                     .map(|device| device.name.clone())
             })
             .unwrap_or_else(|| "系统默认输出".to_owned());
+        let virtual_name = self
+            .receiver
+            .as_ref()
+            .and_then(|runtime| runtime.virtual_sink.as_ref())
+            .map(|sink| sink.name.clone());
         let mut listening = Vec::<ListeningView>::new();
-        let mut active_ids = HashSet::new();
+        let mut active_keys = HashSet::new();
         if let Some(runtime) = self.receiver.as_ref() {
             let streams = runtime
                 .streams
@@ -1605,12 +2023,13 @@ impl Coordinator {
                 } else {
                     "live"
                 };
-                active_ids.insert(stream.sender_id.clone());
+                active_keys.insert(stream.key.clone());
                 listening.push(ListeningView {
+                    key: stream.key.clone(),
                     sender_id: stream.sender_id.clone(),
                     sender_alias: stream.sender_alias.clone(),
+                    kind: stream.kind.label().to_owned(),
                     source: stream.source.clone(),
-                    source_kind: stream.source_kind.clone(),
                     state: state.to_owned(),
                     bitrate_kbps: stream.bitrate_kbps,
                     buffer_ms: counters.buffered_ms,
@@ -1618,20 +2037,24 @@ impl Coordinator {
                     jitter_ms: counters.jitter_ms,
                     loss_pct: counters.loss_ratio() * 100.0,
                     level: stream.level,
-                    output: output_name.clone(),
-                    output_prebuffer_ms: 20,
+                    output: match (&virtual_name, stream.to_virtual) {
+                        (Some(name), true) => name.clone(),
+                        _ => output_name.clone(),
+                    },
+                    to_virtual: stream.to_virtual,
                 });
             }
         }
-        for (sender_id, intent) in &self.intents {
-            if active_ids.contains(sender_id) {
+        for (key, intent) in &self.intents {
+            if active_keys.contains(key) {
                 continue;
             }
             listening.push(ListeningView {
-                sender_id: sender_id.clone(),
+                key: key.clone(),
+                sender_id: intent.peer_id.clone(),
                 sender_alias: intent.sender_alias.clone(),
+                kind: intent.kind.label().to_owned(),
                 source: intent.source.clone(),
-                source_kind: intent.source_kind.clone(),
                 state: "standby".to_owned(),
                 bitrate_kbps: 0,
                 buffer_ms: 0,
@@ -1640,28 +2063,21 @@ impl Coordinator {
                 loss_pct: 0.0,
                 level: 0.0,
                 output: output_name.clone(),
-                output_prebuffer_ms: 20,
+                to_virtual: false,
             });
         }
         listening.sort_by(|left, right| {
-            (left.state == "standby")
-                .cmp(&(right.state == "standby"))
-                .then_with(|| {
-                    left.sender_alias
-                        .to_lowercase()
-                        .cmp(&right.sender_alias.to_lowercase())
-                })
+            left.sender_alias
+                .to_lowercase()
+                .cmp(&right.sender_alias.to_lowercase())
+                .then_with(|| left.kind.cmp(&right.kind).reverse())
         });
 
         let notice = self.notice.as_ref().and_then(|notice| {
-            if notice.until > now {
-                Some(NoticeView {
-                    level: notice.level.clone(),
-                    message: notice.message.clone(),
-                })
-            } else {
-                None
-            }
+            (notice.until > now).then(|| NoticeView {
+                level: notice.level.clone(),
+                message: notice.message.clone(),
+            })
         });
         if self
             .notice
@@ -1686,15 +2102,65 @@ impl Coordinator {
                 discovery: "UDP 组播 + 定向广播 + 子网扫描".to_owned(),
             },
             peers,
-            broadcast,
+            broadcasts,
             listening,
             pending: self.pending.keys().cloned().collect(),
-            sources: self.sources.clone(),
+            sources: self.mics.clone(),
             outputs: self.outputs.clone(),
-            selected_source: self.settings.source_id.clone(),
+            selected_mic: self.settings.mic_id.clone(),
             selected_output: self.settings.output_id.clone(),
+            virtual_mic: VirtualMicView {
+                supported: virtual_mic::supported(),
+                enabled: self.settings.virtual_mic,
+                state: self.virtual_state.label().to_owned(),
+                device: self
+                    .virtual_device
+                    .as_ref()
+                    .map(|device| device.name.clone()),
+                provider: virtual_mic::PROVIDER.to_owned(),
+                link: virtual_mic::LINK.to_owned(),
+            },
+            prefs: PrefsView {
+                restore: self.settings.restore,
+                background: self.settings.background,
+            },
             notice,
         }
+    }
+}
+
+fn listener_view(listener: &ListenerEntry, now: Instant) -> ListenerView {
+    let loss = listener
+        .report
+        .as_ref()
+        .map(|report| {
+            let total = report.received + report.lost;
+            if total == 0 {
+                0.0
+            } else {
+                report.lost as f64 / total as f64 * 100.0
+            }
+        })
+        .unwrap_or(0.0);
+    ListenerView {
+        alias: listener.alias.clone(),
+        id: listener.id.clone(),
+        address: listener.address.ip().to_string(),
+        connected_ms: now
+            .saturating_duration_since(listener.joined_at)
+            .as_millis() as u64,
+        buffer_ms: listener
+            .report
+            .as_ref()
+            .map(|report| report.buffer_ms)
+            .unwrap_or(0),
+        jitter_ms: listener
+            .report
+            .as_ref()
+            .map(|report| report.jitter_us as f64 / 1_000.0)
+            .unwrap_or(0.0),
+        loss_pct: loss,
+        reported: listener.report.is_some(),
     }
 }
 
@@ -1800,9 +2266,13 @@ fn sender_loop(job: SenderJob) {
 fn mixer_loop(
     streams: Arc<Mutex<HashMap<String, Arc<Mutex<ReceiverStream>>>>>,
     mut feed: rtrb::Producer<[f32; 2]>,
+    virtual_out: Outlet,
     stop: Arc<AtomicBool>,
 ) {
-    let mut mixed = vec![0.0f32; FRAME_SAMPLES * CHANNELS];
+    let mut mixes = [
+        vec![0.0f32; FRAME_SAMPLES * CHANNELS],
+        vec![0.0f32; FRAME_SAMPLES * CHANNELS],
+    ];
     let mut decoded = vec![0.0f32; FRAME_SAMPLES * CHANNELS];
     let mut next_tick = Instant::now();
     while !stop.load(Ordering::Acquire) {
@@ -1817,12 +2287,14 @@ fn mixer_loop(
             next_tick += FRAME_DURATION;
         }
 
-        mixed.fill(0.0);
+        for mix in &mut mixes {
+            mix.fill(0.0);
+        }
         let active = streams
             .lock()
             .map(|streams| streams.values().cloned().collect::<Vec<_>>())
             .unwrap_or_default();
-        let mut contributors = 0usize;
+        let mut contributors = [0usize; 2];
         for stream in active {
             let mut stream = stream.lock().unwrap();
             let Some(frame) = stream.buffer.tick(now) else {
@@ -1838,24 +2310,36 @@ fn mixer_loop(
                     .iter()
                     .fold(0.0f32, |peak, sample| peak.max(sample.abs()));
                 stream.level += (peak - stream.level) * 0.35;
-                for (out, sample) in mixed.iter_mut().zip(decoded.iter()) {
+                let lane = usize::from(stream.to_virtual);
+                for (out, sample) in mixes[lane].iter_mut().zip(decoded.iter()) {
                     *out += *sample;
                 }
-                contributors += 1;
+                contributors[lane] += 1;
             }
         }
-        if contributors > 1 {
-            let gain = 1.0 / (contributors as f32).sqrt();
-            for sample in &mut mixed {
-                *sample *= gain;
+        for (mix, count) in mixes.iter_mut().zip(contributors) {
+            if count > 1 {
+                let gain = 1.0 / (count as f32).sqrt();
+                for sample in mix.iter_mut() {
+                    *sample *= gain;
+                }
             }
         }
-        for frame in mixed.as_chunks::<CHANNELS>().0 {
-            let left = frame[0].clamp(-0.98, 0.98);
-            let right = frame[1].clamp(-0.98, 0.98);
-            if feed.push([left, right]).is_err() {
-                break;
-            }
+        push_mix(&mut feed, &mixes[0]);
+        if let Ok(mut outlet) = virtual_out.lock()
+            && let Some(producer) = outlet.as_mut()
+        {
+            push_mix(producer, &mixes[1]);
+        }
+    }
+}
+
+fn push_mix(feed: &mut rtrb::Producer<[f32; 2]>, mix: &[f32]) {
+    for frame in mix.as_chunks::<CHANNELS>().0 {
+        let left = frame[0].clamp(-0.98, 0.98);
+        let right = frame[1].clamp(-0.98, 0.98);
+        if feed.push([left, right]).is_err() {
+            break;
         }
     }
 }
@@ -1874,13 +2358,6 @@ fn epoch_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis() as u64)
         .unwrap_or(0)
-}
-
-fn source_kind_label(kind: SourceKind) -> &'static str {
-    match kind {
-        SourceKind::System => "system",
-        SourceKind::Microphone => "microphone",
-    }
 }
 
 fn quality_tier_key(tier: QualityTier) -> &'static str {
@@ -1906,6 +2383,12 @@ mod tests {
     fn quality_keys_are_stable_wire_values() {
         assert_eq!(quality_tier_key(QualityTier::Lean), "lean");
         assert_eq!(quality_tier_key(QualityTier::Studio), "studio");
+    }
+
+    #[test]
+    fn stream_keys_pair_a_device_with_one_kind() {
+        assert_eq!(stream_key("abc", SourceKind::System), "abc#system");
+        assert_eq!(stream_key("abc", SourceKind::Microphone), "abc#microphone");
     }
 
     #[test]

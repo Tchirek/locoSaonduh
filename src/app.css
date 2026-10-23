@@ -24,6 +24,7 @@
   --ok: #2f7d4f;
   --inverse: #2b2a26;
   --on-inverse: #f3f0e8;
+  --knob: #ffffff;
   --mark-bg: #1c1b18;
   --mark-ink: #f3f0e8;
   --mono: "Cascadia Mono", "SFMono-Regular", Consolas, "Liberation Mono",
@@ -53,6 +54,7 @@
     --ok: #6cc08e;
     --inverse: #ece9e1;
     --on-inverse: #1c1b18;
+    --knob: #ece9e1;
     --mark-bg: #ece9e1;
     --mark-ink: #1c1b18;
   }

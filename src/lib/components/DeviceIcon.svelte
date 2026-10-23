@@ -5,7 +5,8 @@
     platform = "",
     size = 20,
     active = false,
-  }: { platform?: string; size?: number; active?: boolean } = $props();
+    solid = false,
+  }: { platform?: string; size?: number; active?: boolean; solid?: boolean } = $props();
 
   let Icon = $derived(
     platform === "android" || platform === "ios"
@@ -22,7 +23,7 @@
   );
 </script>
 
-<span class="device-icon" class:active aria-hidden="true">
+<span class="device-icon" class:active class:solid aria-hidden="true">
   <Icon {size} strokeWidth={1.6} />
 </span>
 
@@ -44,5 +45,10 @@
   .device-icon.active {
     color: var(--on-accent-soft);
     background: var(--accent-soft);
+  }
+
+  .device-icon.solid {
+    color: var(--on-accent);
+    background: var(--accent);
   }
 </style>
