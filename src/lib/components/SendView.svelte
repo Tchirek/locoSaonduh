@@ -130,7 +130,7 @@
               <DeviceIcon platform={peer.platform} />
               <span class="row-title peer">{peer.alias}</span>
               {#if peer.streams.length > 0}
-                <span class="row-sub"><span class="dot"></span>广播中</span>
+                <span class="row-sub">广播中</span>
               {/if}
             </div>
           {/each}
