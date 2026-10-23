@@ -574,6 +574,60 @@ fn two_devices_play_each_other() {
 }
 
 #[test]
+#[ignore = "requires two microphones and UDP ports 53990-53991"]
+fn switching_microphones_keeps_the_listener() {
+    let (port_a, port_b) = (53990u16, 53991u16);
+    let (dir_a, dir_b) = (temp_dir("switch-a"), temp_dir("switch-b"));
+    let _ = std::fs::remove_dir_all(&dir_a);
+    let _ = std::fs::remove_dir_all(&dir_b);
+    let a = Service::start(dir_a.clone(), port_a).expect("A should start");
+    let b = Service::start(dir_b.clone(), port_b).expect("B should start");
+    let mics = wait_for(&b, |snapshot| snapshot.sources.len() >= 2).sources;
+    b.set_mic(mics[0].id.clone()).unwrap();
+    b.start_stream(SourceKind::Microphone)
+        .expect("microphone should start");
+    let id_b = b.snapshot().identity.id;
+    introduce(&b, port_b, port_a);
+    introduce(&a, port_a, port_b);
+    wait_for(&a, |snapshot| {
+        snapshot.peers.iter().any(|peer| peer.id == id_b)
+    });
+    let key = format!("{id_b}#microphone");
+    a.subscribe(key.clone()).expect("A should listen");
+    wait_for(&a, |snapshot| {
+        snapshot
+            .listening
+            .iter()
+            .any(|stream| stream.state != "standby")
+    });
+    let before = b.snapshot().broadcasts[0].session;
+
+    b.set_mic(mics[1].id.clone())
+        .expect("the microphone should switch");
+    let after = b.snapshot().broadcasts[0].session;
+    assert_ne!(before, after, "a new capture gets a new session");
+    introduce(&b, port_b, port_a);
+    let snapshot = wait_for(&a, |snapshot| {
+        b.snapshot().broadcasts[0].listeners.len() == 1
+            && snapshot
+                .listening
+                .iter()
+                .any(|stream| stream.key == key && stream.state != "standby")
+    });
+    assert!(
+        snapshot.notice.is_none(),
+        "the switch must not look like a stop: {:?}",
+        snapshot.notice
+    );
+
+    a.unsubscribe(key).unwrap();
+    a.shutdown();
+    b.shutdown();
+    let _ = std::fs::remove_dir_all(dir_a);
+    let _ = std::fs::remove_dir_all(dir_b);
+}
+
+#[test]
 #[ignore = "requires VB-CABLE, a microphone and UDP ports 53988-53989"]
 fn a_forwarded_microphone_lands_on_the_virtual_cable() {
     let (port_a, port_b) = (53988u16, 53989u16);

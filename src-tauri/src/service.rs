@@ -323,16 +323,17 @@ enum StopCause {
 }
 
 impl StopCause {
-    fn reason(&self) -> &str {
+    // 席替へは 告げずに札を 掛け替ふる
+    fn reason(&self) -> Option<&str> {
         match self {
-            Self::User | Self::Shutdown => "本机已停止广播",
-            Self::Restart => "广播结束",
-            Self::Failed(message) => message,
+            Self::User | Self::Shutdown => Some("本机已停止广播"),
+            Self::Restart => None,
+            Self::Failed(message) => Some(message),
         }
     }
 
     fn announces(&self) -> bool {
-        matches!(self, Self::User | Self::Failed(_))
+        !matches!(self, Self::Shutdown)
     }
 }
 
@@ -840,13 +841,15 @@ impl Coordinator {
             return;
         };
         let mut runtime = self.broadcasts.remove(index);
-        let ended = Control::Ended {
-            session: runtime.session,
-            reason: cause.reason().to_owned(),
-        };
-        if let Ok(listeners) = runtime.listeners.lock() {
-            for listener in listeners.iter() {
-                self.send_control(listener.address, &ended);
+        if let Some(reason) = cause.reason() {
+            let ended = Control::Ended {
+                session: runtime.session,
+                reason: reason.to_owned(),
+            };
+            if let Ok(listeners) = runtime.listeners.lock() {
+                for listener in listeners.iter() {
+                    self.send_control(listener.address, &ended);
+                }
             }
         }
         runtime.control.stop.store(true, Ordering::Release);
