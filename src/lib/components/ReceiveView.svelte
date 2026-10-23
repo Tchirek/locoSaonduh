@@ -3,7 +3,6 @@
   import { streamKey } from "../types";
   import type { Kind, ListeningStream, Snapshot } from "../types";
   import DeviceIcon from "./DeviceIcon.svelte";
-  import LevelMeter from "./LevelMeter.svelte";
   import Mark from "./Mark.svelte";
 
   let {
@@ -174,8 +173,10 @@
             <span class="row-title">{entry.alias}</span>
             <span class="lanes">
               {#each entry.lanes as lane (lane.key)}
-                {@const state = lane.stream?.state}
-                {@const waiting = connecting === lane.key || snapshot.pending.includes(lane.key)}
+                {@const waiting =
+                  connecting === lane.key ||
+                  snapshot.pending.includes(lane.key) ||
+                  lane.stream?.state === "buffering"}
                 <button
                   type="button"
                   class="lane"
@@ -185,21 +186,14 @@
                   disabled={!lane.stream && (!lane.offered || waiting)}
                   onclick={() => toggle(lane)}
                 >
-                  {#if waiting && !lane.stream}
-                    <span class="spin on"><RefreshCw size={13} /></span>
-                  {:else if lane.stream}
-                    <span class="dot" class:idle={state !== "live"}></span>
+                  {#if waiting}
+                    <span class="spin on"><RefreshCw size={14} strokeWidth={1.8} /></span>
                   {:else if lane.kind === "system"}
                     <Volume2 size={14} strokeWidth={1.8} />
                   {:else}
                     <Mic size={14} strokeWidth={1.8} />
                   {/if}
                   <span>{lane.kind === "system" ? "系统声音" : "麦克风"}</span>
-                  {#if state === "live"}
-                    <span class="lane-meter">
-                      <LevelMeter level={lane.stream?.level ?? 0} tone="accent" bars={6} />
-                    </span>
-                  {/if}
                 </button>
               {/each}
             </span>
@@ -294,11 +288,7 @@
   .lane.on {
     border-color: var(--ink);
     color: var(--ink);
-    font-weight: 600;
-  }
-
-  .lane-meter {
-    width: 26px;
+    background: var(--hover);
   }
 
   .probe {
