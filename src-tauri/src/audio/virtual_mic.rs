@@ -1,93 +1,49 @@
 //! 空蝉に 遠き声入れ 歌はしむ
 
-use anyhow::Result;
-
 use super::device::OutputDevice;
 
-#[cfg(any(target_os = "windows", target_os = "macos"))]
-pub const PROVIDER: &str = "VB-CABLE";
 #[cfg(target_os = "linux")]
-pub const PROVIDER: &str = "PulseAudio";
+use linux as platform;
+#[cfg(target_os = "macos")]
+use macos as platform;
+#[cfg(target_os = "windows")]
+use windows as platform;
 
-#[cfg(any(target_os = "windows", target_os = "macos"))]
-pub const LINK: Option<&str> = Some("https://vb-audio.com/Cable/");
-#[cfg(target_os = "linux")]
-pub const LINK: Option<&str> = None;
+pub use platform::{LINK, PROVIDER, candidates, hides_input, install, prepare, release};
 
 pub fn find(outputs: &[OutputDevice]) -> Option<OutputDevice> {
     candidates(outputs).into_iter().next()
 }
 
-pub fn candidates(outputs: &[OutputDevice]) -> Vec<OutputDevice> {
-    #[cfg(target_os = "linux")]
-    {
-        let _ = outputs;
-        linux::find().into_iter().collect()
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+mod cable {
+    use anyhow::{Error, anyhow};
+
+    use crate::audio::device::OutputDevice;
+
+    pub const PROVIDER: &str = "VB-CABLE";
+    pub const LINK: Option<&str> = Some("https://vb-audio.com/Cable/");
+
+    pub fn outputs(outputs: &[OutputDevice], cable: impl Fn(&str) -> bool) -> Vec<OutputDevice> {
         let mut matches = outputs
             .iter()
-            .filter(|device| is_cable_output(&device.name))
+            .filter(|device| cable(&device.name))
             .cloned()
             .collect::<Vec<_>>();
         matches.sort_by_key(|device| device.name.contains("16"));
         matches
     }
-}
 
-#[cfg(target_os = "linux")]
-pub fn hides_input(id: &str, _name: &str) -> bool {
-    super::pulse::is_ours(id)
-}
-
-#[cfg(not(target_os = "linux"))]
-pub fn hides_input(_id: &str, name: &str) -> bool {
-    if cfg!(target_os = "windows") {
-        name.starts_with("CABLE Output")
-    } else {
-        name.contains("VB-Cable")
+    pub fn failure(stderr: &[u8], cancelled: &[&str]) -> Error {
+        let detail = String::from_utf8_lossy(stderr);
+        if cancelled.iter().any(|marker| detail.contains(marker)) {
+            anyhow!("已取消安装")
+        } else if detail.contains("signature") {
+            anyhow!("安装包签名无效")
+        } else {
+            anyhow!("VB-CABLE 安装失败")
+        }
     }
-}
-
-#[cfg_attr(target_os = "linux", allow(dead_code))]
-fn is_cable_output(name: &str) -> bool {
-    if cfg!(target_os = "windows") {
-        name.starts_with("CABLE In")
-    } else {
-        name.contains("VB-Cable")
-    }
-}
-
-pub fn install() -> Result<()> {
-    #[cfg(target_os = "windows")]
-    {
-        windows::install()
-    }
-    #[cfg(target_os = "macos")]
-    {
-        macos::install()
-    }
-    #[cfg(target_os = "linux")]
-    {
-        linux::prepare()
-    }
-}
-
-pub fn prepare() -> Result<()> {
-    #[cfg(target_os = "linux")]
-    {
-        linux::prepare()
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        Ok(())
-    }
-}
-
-pub fn release() {
-    #[cfg(target_os = "linux")]
-    linux::release();
 }
 
 #[cfg(target_os = "windows")]
@@ -95,7 +51,12 @@ mod windows {
     use std::os::windows::process::CommandExt;
     use std::process::Command;
 
-    use anyhow::{Context, Result, anyhow};
+    use anyhow::{Context, Result};
+
+    use super::cable;
+    use crate::audio::device::OutputDevice;
+
+    pub use super::cable::{LINK, PROVIDER};
 
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     const SCRIPT: &str = r#"
@@ -118,6 +79,14 @@ try {
 Remove-Item $dir -Recurse -Force -ErrorAction SilentlyContinue
 "#;
 
+    pub fn candidates(outputs: &[OutputDevice]) -> Vec<OutputDevice> {
+        cable::outputs(outputs, |name| name.starts_with("CABLE In"))
+    }
+
+    pub fn hides_input(_id: &str, name: &str) -> bool {
+        name.starts_with("CABLE Output")
+    }
+
     pub fn install() -> Result<()> {
         let output = Command::new("powershell.exe")
             .args([
@@ -134,22 +103,26 @@ Remove-Item $dir -Recurse -Force -ErrorAction SilentlyContinue
         if output.status.success() {
             return Ok(());
         }
-        let detail = String::from_utf8_lossy(&output.stderr);
-        Err(if detail.contains("cancelled") {
-            anyhow!("已取消安装")
-        } else if detail.contains("signature") {
-            anyhow!("安装包签名无效")
-        } else {
-            anyhow!("VB-CABLE 安装失败")
-        })
+        Err(cable::failure(&output.stderr, &["cancelled"]))
     }
+
+    pub fn prepare() -> Result<()> {
+        Ok(())
+    }
+
+    pub fn release() {}
 }
 
 #[cfg(target_os = "macos")]
 mod macos {
     use std::process::Command;
 
-    use anyhow::{Context, Result, anyhow};
+    use anyhow::{Context, Result};
+
+    use super::cable;
+    use crate::audio::device::OutputDevice;
+
+    pub use super::cable::{LINK, PROVIDER};
 
     const SCRIPT: &str = r#"
 set -e
@@ -171,6 +144,14 @@ cp "$pkg" "$dir/cable.pkg"
 osascript -e "do shell script \"/usr/sbin/installer -pkg '$dir/cable.pkg' -target /\" with administrator privileges"
 "#;
 
+    pub fn candidates(outputs: &[OutputDevice]) -> Vec<OutputDevice> {
+        cable::outputs(outputs, |name| name.contains("VB-Cable"))
+    }
+
+    pub fn hides_input(_id: &str, name: &str) -> bool {
+        name.contains("VB-Cable")
+    }
+
     pub fn install() -> Result<()> {
         let output = Command::new("/bin/sh")
             .args(["-c", SCRIPT])
@@ -179,15 +160,14 @@ osascript -e "do shell script \"/usr/sbin/installer -pkg '$dir/cable.pkg' -targe
         if output.status.success() {
             return Ok(());
         }
-        let detail = String::from_utf8_lossy(&output.stderr);
-        Err(if detail.contains("-128") || detail.contains("canceled") {
-            anyhow!("已取消安装")
-        } else if detail.contains("signature") {
-            anyhow!("安装包签名无效")
-        } else {
-            anyhow!("VB-CABLE 安装失败")
-        })
+        Err(cable::failure(&output.stderr, &["-128", "canceled"]))
     }
+
+    pub fn prepare() -> Result<()> {
+        Ok(())
+    }
+
+    pub fn release() {}
 }
 
 #[cfg(target_os = "linux")]
@@ -198,22 +178,35 @@ mod linux {
     use crate::audio::pulse::{self, MIC_SINK, MIC_SOURCE, pactl};
     use crate::protocol::{CHANNELS, SAMPLE_RATE};
 
-    pub fn find() -> Option<OutputDevice> {
-        let sinks = pulse::sinks().ok()?;
-        sinks
-            .iter()
-            .any(|(_, name)| name == MIC_SINK)
-            .then(|| OutputDevice {
-                id: pulse::device_id(MIC_SINK),
-                name: "locoSaonduh-Mic".to_owned(),
-                is_default: false,
-                sample_rate: SAMPLE_RATE,
-                channels: CHANNELS as u16,
-            })
+    pub const PROVIDER: &str = "PulseAudio";
+    pub const LINK: Option<&str> = None;
+
+    pub fn candidates(_outputs: &[OutputDevice]) -> Vec<OutputDevice> {
+        let Ok(sinks) = pulse::sinks() else {
+            return Vec::new();
+        };
+        if !sinks.iter().any(|(_, name)| name == MIC_SINK) {
+            return Vec::new();
+        }
+        vec![OutputDevice {
+            id: pulse::device_id(MIC_SINK),
+            name: "locoSaonduh-Mic".to_owned(),
+            is_default: false,
+            sample_rate: SAMPLE_RATE,
+            channels: CHANNELS as u16,
+        }]
+    }
+
+    pub fn hides_input(id: &str, _name: &str) -> bool {
+        pulse::is_ours(id)
+    }
+
+    pub fn install() -> Result<()> {
+        prepare()
     }
 
     pub fn prepare() -> Result<()> {
-        if find().is_some() {
+        if !candidates(&[]).is_empty() {
             return Ok(());
         }
         pactl(&[
@@ -240,5 +233,42 @@ mod linux {
                 pulse::unload(&module.index);
             }
         }
+    }
+}
+
+#[cfg(all(test, target_os = "windows"))]
+mod tests {
+    use super::*;
+
+    fn device(name: &str) -> OutputDevice {
+        OutputDevice {
+            id: name.to_owned(),
+            name: name.to_owned(),
+            is_default: false,
+            sample_rate: 48_000,
+            channels: 2,
+        }
+    }
+
+    #[test]
+    fn the_two_channel_cable_is_preferred_over_the_16_channel_one() {
+        let outputs = [
+            device("CABLE In 16ch (VB-Audio Virtual Cable)"),
+            device("Speakers"),
+            device("CABLE Input (VB-Audio Virtual Cable)"),
+        ];
+        let names = candidates(&outputs)
+            .into_iter()
+            .map(|device| device.name)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            names,
+            [
+                "CABLE Input (VB-Audio Virtual Cable)",
+                "CABLE In 16ch (VB-Audio Virtual Cable)"
+            ]
+        );
+        assert!(hides_input("", "CABLE Output (VB-Audio Virtual Cable)"));
+        assert!(!hides_input("", "Microphone"));
     }
 }
