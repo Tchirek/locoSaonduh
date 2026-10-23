@@ -40,13 +40,12 @@
     height: 6px;
     flex: 1;
     border-radius: 1px;
-    background: currentColor;
-    opacity: 0.14;
-    transition: opacity 120ms linear;
+    background: var(--line-strong);
+    transition: background-color 120ms linear;
   }
 
   span.on {
-    opacity: 1;
+    background: currentColor;
   }
 
   .accent {

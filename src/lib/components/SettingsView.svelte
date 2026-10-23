@@ -49,7 +49,7 @@
 <div class="page">
   <section class="section">
     <div class="section-head"><h2>本机</h2></div>
-    <div class="card group">
+    <div class="group">
       <div class="setting">
         <label class="setting-label" for="alias">设备名</label>
         <span class="setting-control">
@@ -63,7 +63,7 @@
           {#if aliasDirty}
             <button
               type="button"
-              class="icon-button save"
+              class="icon-button"
               aria-label="保存设备名"
               title="保存"
               disabled={savingAlias || !alias.trim()}
@@ -93,7 +93,7 @@
         </button>
       </div>
     </div>
-    <div class="card group">
+    <div class="group">
       <div class="setting">
         <label class="setting-label" for="output">
           播放设备
@@ -148,7 +148,7 @@
 
   <section class="section">
     <div class="section-head"><h2>后台</h2></div>
-    <div class="card group">
+    <div class="group">
       <div class="setting">
         <span class="setting-label">开机自启</span>
         <span class="setting-switch">
@@ -185,26 +185,26 @@
 
   <section class="section">
     <div class="section-head"><h2>网络</h2></div>
-    <div class="card group">
+    <div class="group">
       <div class="setting">
         <span class="setting-label">地址</span>
-        <span class="value mono">
+        <span class="value meta num">
           {snapshot.network.ip ? `${snapshot.network.ip}:${snapshot.network.port}` : "未连接"}
         </span>
       </div>
       <div class="setting">
         <span class="setting-label">网卡</span>
-        <span class="value mono">{snapshot.network.interface ?? "—"}</span>
+        <span class="value meta num">{snapshot.network.interface ?? "—"}</span>
       </div>
     </div>
   </section>
 
-  <p class="about mono">locoSaonduh {__APP_VERSION__}</p>
+  <p class="about meta num">locoSaonduh {__APP_VERSION__}</p>
 </div>
 
 <style>
   .group {
-    padding: 0 14px;
+    border-top: 1px solid var(--line);
   }
 
   .setting {
@@ -212,10 +212,7 @@
     min-height: 52px;
     align-items: center;
     gap: 16px;
-  }
-
-  .setting + .setting {
-    border-top: 1px solid var(--line);
+    border-bottom: 1px solid var(--line);
   }
 
   .setting-label {
@@ -223,15 +220,12 @@
     min-width: 0;
     flex-direction: column;
     gap: 2px;
-    font-size: 13px;
-    font-weight: 500;
   }
 
   .setting-label small {
     overflow: hidden;
-    color: var(--ink-3);
-    font-size: 11px;
-    font-weight: 400;
+    color: var(--muted);
+    font-size: 12px;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
@@ -259,26 +253,19 @@
   }
 
   .vendor:hover {
-    color: var(--accent);
-  }
-
-  .save {
-    color: var(--accent);
+    color: var(--ink);
+    text-decoration: underline;
   }
 
   .value {
     overflow: hidden;
     margin-left: auto;
-    color: var(--ink-2);
-    font-size: 12px;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
 
   .about {
-    margin-top: 28px;
-    color: var(--ink-3);
-    font-size: 11px;
+    margin-top: 32px;
     text-align: center;
   }
 </style>

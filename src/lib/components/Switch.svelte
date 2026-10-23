@@ -36,7 +36,7 @@
     height: 24px;
     flex: none;
     border-radius: 12px;
-    background: var(--tile);
+    background: var(--line-strong);
     transition: background-color 160ms ease;
   }
 
@@ -61,17 +61,6 @@
   }
 
   .switch.busy {
-    opacity: 1;
     cursor: progress;
-  }
-
-  .switch.busy .knob {
-    animation: nudge 900ms ease-in-out infinite;
-  }
-
-  @keyframes nudge {
-    50% {
-      translate: 8px 0;
-    }
   }
 </style>

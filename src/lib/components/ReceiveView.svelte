@@ -108,15 +108,15 @@
 
 <div class="page">
   <header class="identity">
-    <Mark size={44} />
+    <Mark size={40} />
     <div class="identity-copy">
       <h1>{snapshot.identity.alias}</h1>
-      <p class="mono">
+      <p class="meta num">
         {snapshot.network.ip ? `${snapshot.network.ip}:${snapshot.network.port}` : "未连接网络"}
       </p>
     </div>
-    <button type="button" class="output chip" title="播放设备" onclick={onSettings}>
-      <Volume2 size={13} strokeWidth={1.8} />
+    <button type="button" class="output meta" title="播放设备" onclick={onSettings}>
+      <Volume2 size={14} strokeWidth={1.8} />
       <span>{output?.name ?? "默认输出"}</span>
     </button>
   </header>
@@ -124,7 +124,7 @@
   <section class="section">
     <div class="section-head">
       <h2>附近广播</h2>
-      <span class="count">{entries.length}</span>
+      <span class="meta num">{entries.length}</span>
       <div class="tools">
         <button
           type="button"
@@ -151,9 +151,9 @@
     </div>
 
     {#if probeOpen}
-      <form class="probe card" onsubmit={submitProbe}>
+      <form class="probe" onsubmit={submitProbe}>
         <input
-          class="text-input mono"
+          class="text-input num"
           bind:value={probeAddress}
           placeholder="192.168.1.24"
           inputmode="decimal"
@@ -169,54 +169,49 @@
     {#if entries.length > 0}
       <div class="list">
         {#each entries as entry (entry.id)}
-          <div class="card row">
-            <DeviceIcon
-              platform={entry.platform}
-              active={entry.lanes.some((lane) => lane.stream?.state === "live")}
-            />
-            <div class="row-main">
-              <span class="row-title">{entry.alias}</span>
-              <span class="lanes">
-                {#each entry.lanes as lane (lane.key)}
-                  {@const state = lane.stream?.state}
-                  {@const waiting = connecting === lane.key || snapshot.pending.includes(lane.key)}
-                  <button
-                    type="button"
-                    class="lane"
-                    class:on={state && state !== "standby"}
-                    class:standby={state === "standby"}
-                    aria-pressed={Boolean(lane.stream)}
-                    title={laneTitle(lane)}
-                    disabled={!lane.stream && (!lane.offered || waiting)}
-                    onclick={() => toggle(lane)}
-                  >
-                    {#if waiting && !lane.stream}
-                      <span class="spin on"><RefreshCw size={12} /></span>
-                    {:else if lane.kind === "system"}
-                      <Volume2 size={13} strokeWidth={1.9} />
-                    {:else}
-                      <Mic size={13} strokeWidth={1.9} />
-                    {/if}
-                    <span>{lane.kind === "system" ? "系统声音" : "麦克风"}</span>
-                    {#if state === "live"}
-                      <span class="lane-meter"><LevelMeter level={lane.stream?.level ?? 0} tone="accent" bars={6} /></span>
-                    {/if}
-                  </button>
-                {/each}
-              </span>
-            </div>
+          <div class="row">
+            <DeviceIcon platform={entry.platform} />
+            <span class="row-title">{entry.alias}</span>
+            <span class="lanes">
+              {#each entry.lanes as lane (lane.key)}
+                {@const state = lane.stream?.state}
+                {@const waiting = connecting === lane.key || snapshot.pending.includes(lane.key)}
+                <button
+                  type="button"
+                  class="lane"
+                  class:on={Boolean(lane.stream)}
+                  aria-pressed={Boolean(lane.stream)}
+                  title={laneTitle(lane)}
+                  disabled={!lane.stream && (!lane.offered || waiting)}
+                  onclick={() => toggle(lane)}
+                >
+                  {#if waiting && !lane.stream}
+                    <span class="spin on"><RefreshCw size={13} /></span>
+                  {:else if lane.stream}
+                    <span class="dot" class:idle={state !== "live"}></span>
+                  {:else if lane.kind === "system"}
+                    <Volume2 size={14} strokeWidth={1.8} />
+                  {:else}
+                    <Mic size={14} strokeWidth={1.8} />
+                  {/if}
+                  <span>{lane.kind === "system" ? "系统声音" : "麦克风"}</span>
+                  {#if state === "live"}
+                    <span class="lane-meter">
+                      <LevelMeter level={lane.stream?.level ?? 0} tone="accent" bars={6} />
+                    </span>
+                  {/if}
+                </button>
+              {/each}
+            </span>
           </div>
         {/each}
       </div>
     {:else}
-      <div class="empty">
-        <span class="radar" class:on={scanning}><Mark size={40} /></span>
-        <p>暂无广播</p>
-      </div>
+      <p class="empty">暂无广播</p>
     {/if}
 
     {#if idleCount > 0}
-      <p class="foot">另有 {idleCount} 台设备在线</p>
+      <p class="foot meta">另有 {idleCount} 台设备在线</p>
     {/if}
   </section>
 </div>
@@ -226,7 +221,7 @@
     display: flex;
     align-items: center;
     gap: 14px;
-    margin-bottom: 22px;
+    margin-bottom: 28px;
   }
 
   .identity-copy {
@@ -236,84 +231,70 @@
 
   .identity h1 {
     overflow: hidden;
-    font-size: 22px;
-    line-height: 1.2;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
 
   .identity p {
-    margin-top: 3px;
-    color: var(--ink-3);
-    font-size: 12px;
+    margin-top: 2px;
   }
 
   .output {
+    display: flex;
+    min-width: 0;
     max-width: 40%;
-    gap: 5px;
-    height: 26px;
-    padding: 0 10px;
-    border-radius: 13px;
-    background: var(--card);
-    transition: background-color 140ms ease;
-  }
-
-  .output:hover {
-    background: var(--card-hover);
+    align-items: center;
+    gap: 6px;
   }
 
   .output span {
     overflow: hidden;
     text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .output :global(svg) {
     flex: none;
   }
 
+  .output:hover {
+    color: var(--ink);
+  }
+
+  .row .row-title {
+    flex: 1;
+  }
+
   .lanes {
     display: flex;
-    flex-wrap: wrap;
+    flex: none;
     gap: 6px;
-    margin-top: 3px;
   }
 
   .lane {
     display: inline-flex;
-    height: 28px;
+    height: 30px;
     align-items: center;
     gap: 6px;
     padding: 0 10px;
-    border: 1.5px solid transparent;
-    border-radius: 14px;
-    background: var(--bg);
-    color: var(--ink-2);
+    border: 1px solid var(--line-strong);
+    border-radius: var(--radius);
+    color: var(--muted);
     font-size: 12px;
-    font-weight: 600;
     transition:
-      background-color 140ms ease,
       border-color 140ms ease,
       color 140ms ease;
   }
 
   .lane:hover:not(:disabled) {
-    border-color: var(--tile);
+    border-color: var(--ink);
     color: var(--ink);
   }
 
   .lane.on {
-    color: var(--on-accent-soft);
-    background: var(--accent-soft);
-  }
-
-  .lane.on:hover:not(:disabled) {
-    border-color: var(--accent);
-  }
-
-  .lane.standby {
-    border-color: var(--accent-soft);
-    color: var(--on-accent-soft);
-    opacity: 0.7;
+    border-color: var(--ink);
+    color: var(--ink);
+    font-weight: 600;
   }
 
   .lane-meter {
@@ -323,52 +304,21 @@
   .probe {
     display: flex;
     gap: 8px;
-    margin-bottom: 8px;
-    padding: 8px;
-  }
-
-  .radar {
-    position: relative;
-    display: grid;
-    place-items: center;
-    margin-bottom: 4px;
-  }
-
-  /* 秋澄むや 輪をひろげては 声を待つ */
-  .radar::after {
-    position: absolute;
-    inset: -6px;
-    border: 1.5px solid var(--accent);
-    border-radius: 16px;
-    content: "";
-    opacity: 0;
-  }
-
-  .radar.on::after {
-    animation: ripple 1.2s ease-out infinite;
-  }
-
-  @keyframes ripple {
-    from {
-      opacity: 0.55;
-      scale: 0.85;
-    }
-    to {
-      opacity: 0;
-      scale: 1.35;
-    }
+    margin-bottom: 12px;
   }
 
   .foot {
-    margin-top: 10px;
-    color: var(--ink-3);
-    font-size: 12px;
+    margin-top: 12px;
     text-align: center;
   }
 
   @media (max-width: 480px) {
     .output {
       display: none;
+    }
+
+    .row {
+      flex-wrap: wrap;
     }
   }
 </style>
