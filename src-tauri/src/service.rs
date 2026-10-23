@@ -48,7 +48,6 @@ const LISTENER_TTL: Duration = Duration::from_secs(30);
 const VIRTUAL_SETTLE: Duration = Duration::from_secs(12);
 const MAX_LISTENERS: usize = 24;
 const MAX_INTENTS: usize = 8;
-const LOCAL_STOP: &str = "本机已停止广播";
 
 type Reply = Sender<Result<(), String>>;
 
@@ -316,6 +315,27 @@ fn microphones(settings: &Settings) -> Vec<AudioSource> {
     list_microphones(|id, name| hide_virtual && virtual_mic::hides_input(id, name))
 }
 
+enum StopCause {
+    User,
+    Shutdown,
+    Restart,
+    Failed(String),
+}
+
+impl StopCause {
+    fn reason(&self) -> &str {
+        match self {
+            Self::User | Self::Shutdown => "本机已停止广播",
+            Self::Restart => "广播结束",
+            Self::Failed(message) => message,
+        }
+    }
+
+    fn announces(&self) -> bool {
+        matches!(self, Self::User | Self::Failed(_))
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum VirtualState {
     Missing,
@@ -558,7 +578,7 @@ impl Coordinator {
 
     fn shutdown(&mut self) {
         for kind in [SourceKind::System, SourceKind::Microphone] {
-            self.stop_stream(kind, Some(LOCAL_STOP.to_owned()), false);
+            self.stop_stream(kind, StopCause::Shutdown);
         }
         self.stop_receiver();
         virtual_mic::release();
@@ -587,7 +607,7 @@ impl Coordinator {
                 let _ = reply.send(result);
             }
             Command::StopStream { kind, reply } => {
-                self.stop_stream(kind, Some(LOCAL_STOP.to_owned()), true);
+                self.stop_stream(kind, StopCause::User);
                 self.remember_stream(kind, false);
                 let _ = reply.send(Ok(()));
             }
@@ -629,7 +649,7 @@ impl Coordinator {
                     self.settings.mic_id = Some(source_id);
                     self.save();
                     if self.stream(SourceKind::Microphone).is_some() {
-                        self.stop_stream(SourceKind::Microphone, None, false);
+                        self.stop_stream(SourceKind::Microphone, StopCause::Restart);
                         self.start_stream(SourceKind::Microphone)
                             .map_err(|error| format!("{error:#}"))
                     } else {
@@ -811,7 +831,7 @@ impl Coordinator {
         Ok(())
     }
 
-    fn stop_stream(&mut self, kind: SourceKind, reason: Option<String>, announce: bool) {
+    fn stop_stream(&mut self, kind: SourceKind, cause: StopCause) {
         let Some(index) = self
             .broadcasts
             .iter()
@@ -822,7 +842,7 @@ impl Coordinator {
         let mut runtime = self.broadcasts.remove(index);
         let ended = Control::Ended {
             session: runtime.session,
-            reason: reason.clone().unwrap_or_else(|| "广播结束".to_owned()),
+            reason: cause.reason().to_owned(),
         };
         if let Ok(listeners) = runtime.listeners.lock() {
             for listener in listeners.iter() {
@@ -834,13 +854,11 @@ impl Coordinator {
         if let Some(sender) = runtime.sender.take() {
             let _ = sender.join();
         }
-        if announce {
+        if cause.announces() {
             self.announce_now();
         }
-        if let Some(reason) = reason
-            && reason != LOCAL_STOP
-        {
-            self.set_notice("error", reason);
+        if let StopCause::Failed(message) = cause {
+            self.set_notice("error", message);
         }
         self.publish();
     }
@@ -1746,7 +1764,7 @@ impl Coordinator {
             .collect::<Vec<_>>();
         for (kind, error) in failed {
             log::warn!("{} capture stopped: {error}", kind.label());
-            self.stop_stream(kind, Some(format!("采集已中断：{error}")), true);
+            self.stop_stream(kind, StopCause::Failed(format!("采集已中断：{error}")));
         }
         let virtual_error = self.receiver.as_ref().and_then(|runtime| {
             runtime
