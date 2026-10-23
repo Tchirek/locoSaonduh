@@ -1,0 +1,185 @@
+<script lang="ts">
+  import { untrack } from "svelte";
+  import { Check, ChevronDown, RefreshCw } from "@lucide/svelte";
+  import type { Snapshot } from "../types";
+
+  let {
+    snapshot,
+    refreshing = false,
+    onSetAlias,
+    onSetOutput,
+    onRefresh,
+  }: {
+    snapshot: Snapshot;
+    refreshing?: boolean;
+    onSetAlias: (alias: string) => Promise<boolean>;
+    onSetOutput: (outputId: string | null) => void;
+    onRefresh: () => void;
+  } = $props();
+
+  let alias = $state(untrack(() => snapshot.identity.alias));
+  let savingAlias = $state(false);
+
+  let aliasDirty = $derived(alias.trim() !== snapshot.identity.alias);
+  let outputBusy = $derived(
+    snapshot.listening.length > 0 || snapshot.pending.length > 0,
+  );
+
+  async function saveAlias() {
+    if (savingAlias || !aliasDirty) return;
+    savingAlias = true;
+    if (await onSetAlias(alias)) alias = alias.trim();
+    savingAlias = false;
+  }
+</script>
+
+<div class="page">
+  <section class="section">
+    <div class="section-head"><h2>本机</h2></div>
+    <div class="card group">
+      <div class="setting">
+        <label class="setting-label" for="alias">设备名</label>
+        <span class="setting-control">
+          <input
+            id="alias"
+            class="text-input"
+            bind:value={alias}
+            maxlength="32"
+            onkeydown={(event) => event.key === "Enter" && saveAlias()}
+          />
+          {#if aliasDirty}
+            <button
+              type="button"
+              class="icon-button save"
+              aria-label="保存设备名"
+              title="保存"
+              disabled={savingAlias || !alias.trim()}
+              onclick={saveAlias}
+            >
+              <Check size={17} strokeWidth={2.2} />
+            </button>
+          {/if}
+        </span>
+      </div>
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="section-head">
+      <h2>音频</h2>
+      <div class="tools">
+        <button
+          type="button"
+          class="icon-button"
+          aria-label="刷新设备"
+          title="刷新设备"
+          onclick={onRefresh}
+          disabled={refreshing}
+        >
+          <span class="spin" class:on={refreshing}><RefreshCw size={15} strokeWidth={1.8} /></span>
+        </button>
+      </div>
+    </div>
+    <div class="card group">
+      <div class="setting">
+        <label class="setting-label" for="output">
+          播放设备
+          {#if outputBusy}<small>收听中不可改</small>{/if}
+        </label>
+        <span class="setting-control select-wrap">
+          <select
+            id="output"
+            class="select"
+            value={snapshot.selectedOutput ?? ""}
+            onchange={(event) => onSetOutput(event.currentTarget.value || null)}
+            disabled={outputBusy}
+          >
+            <option value="">跟随系统</option>
+            {#each snapshot.outputs as device (device.id)}
+              <option value={device.id}>{device.name}</option>
+            {/each}
+          </select>
+          <ChevronDown size={15} strokeWidth={1.7} />
+        </span>
+      </div>
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="section-head"><h2>网络</h2></div>
+    <div class="card group">
+      <div class="setting">
+        <span class="setting-label">地址</span>
+        <span class="value mono">
+          {snapshot.network.ip ? `${snapshot.network.ip}:${snapshot.network.port}` : "未连接"}
+        </span>
+      </div>
+      <div class="setting">
+        <span class="setting-label">网卡</span>
+        <span class="value mono">{snapshot.network.interface ?? "—"}</span>
+      </div>
+    </div>
+  </section>
+
+  <p class="about mono">locoSaonduh {__APP_VERSION__}</p>
+</div>
+
+<style>
+  .group {
+    padding: 0 14px;
+  }
+
+  .setting {
+    display: flex;
+    min-height: 52px;
+    align-items: center;
+    gap: 16px;
+  }
+
+  .setting + .setting {
+    border-top: 1px solid var(--line);
+  }
+
+  .setting-label {
+    display: flex;
+    flex: none;
+    flex-direction: column;
+    gap: 2px;
+    font-size: 13px;
+    font-weight: 500;
+  }
+
+  .setting-label small {
+    color: var(--ink-3);
+    font-size: 11px;
+    font-weight: 400;
+  }
+
+  .setting-control {
+    display: flex;
+    width: min(260px, 60%);
+    align-items: center;
+    gap: 4px;
+    margin-left: auto;
+  }
+
+  .save {
+    color: var(--accent);
+  }
+
+  .value {
+    overflow: hidden;
+    margin-left: auto;
+    color: var(--ink-2);
+    font-size: 12px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .about {
+    margin-top: 28px;
+    color: var(--ink-3);
+    font-size: 11px;
+    text-align: center;
+  }
+</style>

@@ -2,7 +2,7 @@
   import { onMount } from "svelte";
   import ReceiveView from "./lib/components/ReceiveView.svelte";
   import SendView from "./lib/components/SendView.svelte";
-  import SettingsDialog from "./lib/components/SettingsDialog.svelte";
+  import SettingsView from "./lib/components/SettingsView.svelte";
   import Sidebar from "./lib/components/Sidebar.svelte";
   import Mark from "./lib/components/Mark.svelte";
   import {
@@ -24,20 +24,15 @@
   let snapshot = $state<Snapshot | null>(null);
   let fatal = $state<string | null>(null);
   let tab = $state<Tab>("receive");
-  let settingsOpen = $state(false);
   let starting = $state(false);
   let stopping = $state(false);
   let scanning = $state(false);
+  let refreshing = $state(false);
   let connectingId = $state<string | null>(null);
   let toast = $state<Notice | null>(null);
   let toastTimer: ReturnType<typeof setTimeout> | undefined;
   let lastNoticeMessage = "";
   let scrollEl = $state<HTMLElement>();
-
-  let available = $derived(
-    snapshot?.peers.filter((peer) => peer.isBroadcasting).length ?? 0,
-  );
-  let listeningCount = $derived(snapshot?.listening.length ?? 0);
 
   onMount(() => {
     let cancelled = false;
@@ -96,181 +91,126 @@
     if (toastTimer) clearTimeout(toastTimer);
     toastTimer = setTimeout(() => {
       toast = null;
-    }, 5200);
+    }, 4200);
+  }
+
+  // つまづきは 紅葉のごとく 札に散る
+  async function attempt(task: () => Promise<unknown>): Promise<boolean> {
+    try {
+      await task();
+      return true;
+    } catch (error) {
+      showToast(messageOf(error));
+      return false;
+    }
   }
 
   async function handleStart(sourceId: string) {
     starting = true;
-    try {
-      await startBroadcast(sourceId);
-    } catch (error) {
-      showToast(messageOf(error));
-    } finally {
-      starting = false;
-    }
+    await attempt(() => startBroadcast(sourceId));
+    starting = false;
   }
 
   async function handleStop() {
     stopping = true;
-    try {
-      await stopBroadcast();
-    } catch (error) {
-      showToast(messageOf(error));
-    } finally {
-      stopping = false;
-    }
+    await attempt(stopBroadcast);
+    stopping = false;
   }
 
   async function handleSubscribe(peerId: string) {
     connectingId = peerId;
-    try {
-      await subscribe(peerId);
-    } catch (error) {
-      showToast(messageOf(error));
-    } finally {
-      connectingId = null;
-    }
-  }
-
-  async function handleUnsubscribe(senderId: string) {
-    try {
-      await unsubscribe(senderId);
-    } catch (error) {
-      showToast(messageOf(error));
-    }
-  }
-
-  async function handleSourceChange(sourceId: string) {
-    try {
-      await setSource(sourceId);
-    } catch (error) {
-      showToast(messageOf(error));
-    }
+    await attempt(() => subscribe(peerId));
+    connectingId = null;
   }
 
   async function handleScan() {
     if (scanning) return;
     scanning = true;
-    try {
+    await attempt(async () => {
       await probeNetwork();
       await new Promise((resolve) => setTimeout(resolve, 650));
-    } catch (error) {
-      showToast(messageOf(error));
-    } finally {
-      scanning = false;
-    }
+    });
+    scanning = false;
   }
 
-  function openSettings() {
-    settingsOpen = true;
-    refreshAudio().catch(() => undefined);
+  async function handleRefresh() {
+    if (refreshing) return;
+    refreshing = true;
+    await attempt(refreshAudio);
+    refreshing = false;
   }
 
   function changeTab(next: Tab) {
     if (tab === next) return;
     tab = next;
     scrollEl?.scrollTo({ top: 0 });
-  }
-
-  async function handleSetAlias(alias: string) {
-    await setAlias(alias);
-  }
-
-  async function handleSetSource(sourceId: string) {
-    await setSource(sourceId);
-  }
-
-  async function handleSetOutput(outputId: string | null) {
-    await setOutput(outputId);
-  }
-
-  async function handleRefreshAudio() {
-    await refreshAudio();
-  }
-
-  async function handleProbeAddress(address: string) {
-    await probeAddress(address);
+    if (next === "settings") refreshAudio().catch(() => undefined);
   }
 </script>
 
 {#if fatal && !snapshot}
-  <main class="fatal">
-    <div class="fatal-inner">
-      <Mark size={44} />
-      <p class="fatal-kicker">引擎未启动</p>
-      <h1>声音服务没有起来。</h1>
-      <p class="fatal-copy">{fatal}</p>
-      <p class="fatal-help">
-        最常见的原因是端口 53410 被其他程序占用，或局域网权限被系统拦截。关闭占用端口的程序后重新打开
-        locoSaonduh。
-      </p>
-    </div>
+  <main class="center">
+    <Mark size={48} />
+    <h1>音频服务未启动</h1>
+    <p class="fatal-copy mono">{fatal}</p>
+    <p class="fatal-hint">端口 53410 可能被占用，关闭占用程序后重开</p>
   </main>
 {:else if !snapshot}
-  <main class="boot" role="status" aria-live="polite">
-    <Mark size={36} />
-    <p class="mono">正在打开本地音频与局域网发现</p>
+  <main class="center" role="status" aria-label="正在启动">
+    <span class="boot"><Mark size={40} /></span>
   </main>
 {:else}
   <div class="shell">
     <Sidebar
       {tab}
-      {available}
-      listening={listeningCount}
-      identity={snapshot.identity}
-      network={snapshot.network}
+      listening={snapshot.listening.length}
+      live={Boolean(snapshot.broadcast)}
       onTab={changeTab}
-      onSettings={openSettings}
     />
 
     <main class="main" bind:this={scrollEl}>
-      <div class="workspace">
-        {#if tab === "send"}
-          <div class="view">
-            <SendView
-              {snapshot}
-              {starting}
-              {stopping}
-              {scanning}
-              onStart={handleStart}
-              onStop={handleStop}
-              onSourceChange={handleSourceChange}
-              onScan={handleScan}
-              onSettings={openSettings}
-            />
-          </div>
-        {:else}
-          <div class="view">
+      {#key tab}
+        <div class="view">
+          {#if tab === "receive"}
             <ReceiveView
               {snapshot}
               {connectingId}
               {scanning}
               onSubscribe={handleSubscribe}
-              onUnsubscribe={handleUnsubscribe}
+              onUnsubscribe={(senderId) => attempt(() => unsubscribe(senderId))}
               onScan={handleScan}
-              onSettings={openSettings}
+              onProbe={(address) => attempt(() => probeAddress(address))}
+              onSettings={() => changeTab("settings")}
             />
-          </div>
-        {/if}
-      </div>
+          {:else if tab === "send"}
+            <SendView
+              {snapshot}
+              {starting}
+              {stopping}
+              {scanning}
+              {refreshing}
+              onStart={handleStart}
+              onStop={handleStop}
+              onSourceChange={(sourceId) => attempt(() => setSource(sourceId))}
+              onScan={handleScan}
+              onRefresh={handleRefresh}
+            />
+          {:else}
+            <SettingsView
+              {snapshot}
+              {refreshing}
+              onSetAlias={(alias) => attempt(() => setAlias(alias))}
+              onSetOutput={(outputId) => attempt(() => setOutput(outputId))}
+              onRefresh={handleRefresh}
+            />
+          {/if}
+        </div>
+      {/key}
     </main>
   </div>
 
-  <SettingsDialog
-    open={settingsOpen}
-    {snapshot}
-    onClose={() => (settingsOpen = false)}
-    onError={showToast}
-    onSetAlias={handleSetAlias}
-    onSetSource={handleSetSource}
-    onSetOutput={handleSetOutput}
-    onRefresh={handleRefreshAudio}
-    onProbeAddress={handleProbeAddress}
-  />
-
   {#if toast}
-    <div class="notice-toast" role="status" aria-live="polite">
-      <strong>{toast.level === "error" ? "没有完成" : toast.level === "warning" ? "注意" : "状态"}</strong>
+    <div class="toast {toast.level}" role="status" aria-live="polite">
       {toast.message}
     </div>
   {/if}
@@ -281,7 +221,6 @@
     display: flex;
     width: 100%;
     height: 100%;
-    background: var(--paper);
   }
 
   .main {
@@ -289,93 +228,98 @@
     height: 100%;
     flex: 1;
     overflow-y: auto;
-    scrollbar-color: var(--rule-strong) transparent;
-    scrollbar-gutter: stable;
+    scrollbar-color: var(--tile) transparent;
     scrollbar-width: thin;
   }
 
-  .workspace {
-    width: 100%;
-    max-width: 1080px;
-    margin: 0 auto;
-  }
-
   .view {
-    animation: view-in 180ms ease-out both;
+    animation: view-in 160ms ease-out both;
   }
 
   @keyframes view-in {
     from {
       opacity: 0;
-      transform: translateY(4px);
-    }
-    to {
-      opacity: 1;
-      transform: translateY(0);
+      transform: translateY(3px);
     }
   }
 
-  .boot,
-  .fatal {
+  .center {
     display: flex;
     width: 100%;
     height: 100%;
+    flex-direction: column;
     align-items: center;
     justify-content: center;
-    background: var(--paper);
+    gap: 12px;
+    padding: 24px;
+    text-align: center;
   }
 
-  .boot {
-    flex-direction: column;
-    gap: 18px;
-    --mark-bg: #e8e4da;
-    --mark-ink: #565b51;
-  }
-
-  .boot p {
-    color: var(--ink-muted);
-    font-size: 11px;
-  }
-
-  .fatal-inner {
-    width: min(520px, calc(100vw - 48px));
-    padding: 0 0 18px;
-    border-top: 1px solid var(--rule-strong);
-  }
-
-  .fatal-kicker {
-    margin-top: 30px;
-    color: var(--accent);
-    font-family: var(--mono);
-    font-size: 11px;
-  }
-
-  .fatal h1 {
-    margin-top: 10px;
-    font-size: clamp(36px, 5vw, 50px);
-    line-height: 1.02;
+  .center h1 {
+    margin-top: 6px;
+    font-size: 20px;
   }
 
   .fatal-copy {
-    margin-top: 18px;
-    padding: 12px 14px;
-    border-left: 2px solid var(--accent);
-    background: var(--surface);
-    color: var(--ink-secondary);
-    font-size: 13px;
-    line-height: 1.65;
-  }
-
-  .fatal-help {
-    margin-top: 16px;
-    color: var(--ink-muted);
+    max-width: 420px;
+    padding: 8px 12px;
+    border-radius: var(--radius-sm);
+    background: var(--card);
+    color: var(--ink-2);
     font-size: 12px;
-    line-height: 1.7;
   }
 
-  @media (max-width: 760px) {
-    .workspace {
-      max-width: none;
+  .fatal-hint {
+    color: var(--ink-3);
+    font-size: 12px;
+  }
+
+  .boot {
+    animation: breathe 1.4s ease-in-out infinite;
+  }
+
+  @keyframes breathe {
+    50% {
+      opacity: 0.45;
+    }
+  }
+
+  .toast {
+    position: fixed;
+    bottom: 20px;
+    left: 50%;
+    z-index: 80;
+    width: max-content;
+    max-width: min(420px, calc(100vw - 32px));
+    padding: 10px 16px;
+    border-radius: var(--radius-sm);
+    color: var(--on-inverse);
+    background: var(--inverse);
+    font-size: 13px;
+    line-height: 1.5;
+    transform: translateX(-50%);
+    animation: toast-in 160ms ease-out both;
+  }
+
+  .toast.error,
+  .toast.warning {
+    box-shadow: inset 3px 0 0 var(--accent);
+  }
+
+  @keyframes toast-in {
+    from {
+      opacity: 0;
+      translate: 0 6px;
+    }
+  }
+
+  @media (max-width: 560px) {
+    .shell {
+      flex-direction: column-reverse;
+    }
+
+    .toast {
+      bottom: 76px;
     }
   }
 </style>

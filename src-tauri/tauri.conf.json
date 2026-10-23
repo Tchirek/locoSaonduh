@@ -14,10 +14,10 @@
       {
         "label": "main",
         "title": "locoSaonduh",
-        "width": 1120,
-        "height": 760,
-        "minWidth": 820,
-        "minHeight": 600,
+        "width": 720,
+        "height": 540,
+        "minWidth": 380,
+        "minHeight": 460,
         "center": true,
         "resizable": true,
         "fullscreen": false

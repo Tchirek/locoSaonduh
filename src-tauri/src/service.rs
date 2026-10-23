@@ -800,7 +800,7 @@ impl Coordinator {
             underrun_samples,
             error,
         } = PlaybackSink::open(self.settings.output_id.as_deref())
-            .map_err(|error| format!("输出设备无法打开：{error}. 请在右上角设置里换一个输出。"))?;
+            .map_err(|error| format!("输出设备无法打开：{error}，请在设置中更换"))?;
         let streams = Arc::new(Mutex::new(HashMap::new()));
         let stop = Arc::new(AtomicBool::new(false));
         let mixer = {

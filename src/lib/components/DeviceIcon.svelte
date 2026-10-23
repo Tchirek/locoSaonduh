@@ -1,8 +1,11 @@
 <script lang="ts">
-  import { Laptop, Monitor, Smartphone, SquareTerminal } from "@lucide/svelte";
+  import { Laptop, Mic, Monitor, Smartphone, SquareTerminal, Volume2 } from "@lucide/svelte";
 
-  let { platform = "", size = 19 }: { platform?: string; size?: number } =
-    $props();
+  let {
+    platform = "",
+    size = 20,
+    active = false,
+  }: { platform?: string; size?: number; active?: boolean } = $props();
 
   let Icon = $derived(
     platform === "android" || platform === "ios"
@@ -11,21 +14,35 @@
         ? Monitor
         : platform === "linux"
           ? SquareTerminal
-          : Laptop,
+          : platform === "system"
+            ? Volume2
+            : platform === "microphone"
+              ? Mic
+              : Laptop,
   );
 </script>
 
-<span class="device-icon" aria-hidden="true">
-  <Icon size={size} strokeWidth={1.55} />
+<span class="device-icon" class:active aria-hidden="true">
+  <Icon {size} strokeWidth={1.6} />
 </span>
 
 <style>
   .device-icon {
     display: inline-grid;
-    width: 34px;
-    height: 34px;
+    width: 40px;
+    height: 40px;
     flex: none;
     place-items: center;
-    color: var(--ink-secondary);
+    border-radius: 10px;
+    background: var(--tile);
+    color: var(--ink-2);
+    transition:
+      background-color 140ms ease,
+      color 140ms ease;
+  }
+
+  .device-icon.active {
+    color: var(--on-accent-soft);
+    background: var(--accent-soft);
   }
 </style>

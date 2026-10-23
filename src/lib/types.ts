@@ -123,4 +123,4 @@ export interface Notice {
   message: string;
 }
 
-export type Tab = "send" | "receive";
+export type Tab = "receive" | "send" | "settings";

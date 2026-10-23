@@ -1,11 +1,5 @@
 <script lang="ts">
-  import {
-    ChevronDown,
-    Play,
-    RefreshCw,
-    Settings2,
-    X,
-  } from "@lucide/svelte";
+  import { Play, Plus, RefreshCw, Volume2 } from "@lucide/svelte";
   import type { ListeningStream, Peer, Snapshot } from "../types";
   import DeviceIcon from "./DeviceIcon.svelte";
   import LevelMeter from "./LevelMeter.svelte";
@@ -18,6 +12,7 @@
     onSubscribe,
     onUnsubscribe,
     onScan,
+    onProbe,
     onSettings,
   }: {
     snapshot: Snapshot;
@@ -26,996 +21,340 @@
     onSubscribe: (peerId: string) => void;
     onUnsubscribe: (senderId: string) => void;
     onScan: () => void;
+    onProbe: (address: string) => Promise<boolean>;
     onSettings: () => void;
   } = $props();
+
+  interface Entry {
+    id: string;
+    alias: string;
+    platform: string;
+    peer?: Peer;
+    stream?: ListeningStream;
+  }
+
+  let probeOpen = $state(false);
+  let probeAddress = $state("");
+  let probing = $state(false);
 
   let output = $derived(
     snapshot.outputs.find((device) => device.id === snapshot.selectedOutput) ??
       snapshot.outputs.find((device) => device.isDefault) ??
       snapshot.outputs[0],
   );
-  let broadcasting = $derived(
-    snapshot.peers.filter((peer) => peer.isBroadcasting),
-  );
+  let localBlock = $derived(Boolean(snapshot.broadcast));
   let idleCount = $derived(
     snapshot.peers.filter((peer) => !peer.isBroadcasting).length,
   );
-  let listening = $derived(snapshot.listening);
-  let activeListening = $derived(
-    listening.filter((stream) => stream.state !== "standby"),
-  );
-  let standbyListening = $derived(
-    listening.filter((stream) => stream.state === "standby"),
-  );
-  let localBlock = $derived(Boolean(snapshot.broadcast));
-  let mixTitle = $derived(
-    activeListening.length > 0 ? "正在播放" : "守听中",
-  );
-  let mixCount = $derived.by(() => {
-    if (activeListening.length === 0) {
-      return `${standbyListening.length} 路守听`;
-    }
-    if (standbyListening.length > 0) {
-      return `${activeListening.length} 路混音 · ${standbyListening.length} 路守听`;
-    }
-    return `${activeListening.length} 路混音`;
-  });
-  let bufferTargetLabel = $derived.by(() => {
-    if (activeListening.length === 0) return "";
-    const values = activeListening.map((stream) => stream.targetMs);
-    const low = Math.min(...values);
-    const high = Math.max(...values);
-    return low === high ? `${low} ms` : `${low}–${high} ms`;
-  });
 
-  function platformFor(senderId: string): string {
-    return (
-      snapshot.peers.find((peer) => peer.id === senderId)?.platform ?? "desktop"
+  // 鳴く虫も 黙せる虫も 一列に
+  let entries = $derived.by(() => {
+    const streams = new Map(
+      snapshot.listening.map((stream) => [stream.senderId, stream]),
     );
+    const list: Entry[] = snapshot.peers
+      .filter((peer) => peer.isBroadcasting || streams.has(peer.id))
+      .map((peer) => ({
+        id: peer.id,
+        alias: peer.alias,
+        platform: peer.platform,
+        peer,
+        stream: streams.get(peer.id),
+      }));
+    for (const stream of snapshot.listening) {
+      if (!list.some((entry) => entry.id === stream.senderId)) {
+        list.push({
+          id: stream.senderId,
+          alias: stream.senderAlias,
+          platform: "desktop",
+          stream,
+        });
+      }
+    }
+    return list;
+  });
+
+  function streamLine(stream: ListeningStream): string {
+    if (stream.state === "standby") return `${stream.source} · 等待恢复`;
+    if (stream.state === "buffering") return `${stream.source} · 缓冲中`;
+    if (stream.state === "waiting") return `${stream.source} · 等待音频`;
+    return `${stream.source} · ${stream.bitrateKbps} kbps · ${stream.bufferMs} ms`;
   }
 
-  function playedFor(peer: Peer): string {
-    if (!peer.broadcast) return "";
-    const seconds = Math.max(
-      0,
-      Math.floor((Date.now() - peer.broadcast.startedAtMs) / 1000),
-    );
-    if (seconds < 60) return "刚刚开始";
-    const minutes = Math.floor(seconds / 60);
-    if (minutes < 60) return `已播 ${minutes} 分钟`;
-    return `已播 ${Math.floor(minutes / 60)} 小时`;
-  }
-
-  function stateLabel(stream: ListeningStream): string {
-    if (stream.state === "standby") return "等待恢复";
-    if (stream.state === "buffering") return "建立缓冲";
-    if (stream.state === "waiting") return "等待音频";
-    return "播放中";
-  }
-
-  function isConnected(peerId: string): boolean {
-    return listening.some((stream) => stream.senderId === peerId);
+  async function submitProbe(event: SubmitEvent) {
+    event.preventDefault();
+    const address = probeAddress.trim();
+    if (probing || !address) return;
+    probing = true;
+    if (await onProbe(address)) {
+      probeAddress = "";
+      probeOpen = false;
+    }
+    probing = false;
   }
 </script>
 
 <div class="page">
-  <header class="receive-hero">
-    <div class="hero-main">
-      <p class="mode-label">接收</p>
+  <header class="identity">
+    <Mark size={44} />
+    <div class="identity-copy">
       <h1>{snapshot.identity.alias}</h1>
-      <p class="discovery">
-        <span class="live-dot" aria-hidden="true"></span>
-        可被附近设备发现
-        <span class="slash" aria-hidden="true">/</span>
-        <span class="mono">{snapshot.network.ip ?? "未连接"}:{snapshot.network.port}</span>
+      <p class="mono">
+        <span class="live-dot" class:idle={!snapshot.network.ip}></span>
+        {snapshot.network.ip ? `${snapshot.network.ip}:${snapshot.network.port}` : "未连接网络"}
       </p>
     </div>
-    <div class="output-block">
-      <span class="output-label">播放到</span>
-      <button type="button" class="output-button" onclick={onSettings}>
-        <span>{output?.name ?? "还没有输出设备"}</span>
-        <ChevronDown size={14} strokeWidth={1.6} />
-      </button>
-      <span class="output-meta mono">
-        {#if output}
-          {output.sampleRate / 1000} kHz · {output.channels === 1 ? "单声道" : "立体声"}
-        {:else}
-          在设置中选择
-        {/if}
-      </span>
-    </div>
+    <button
+      type="button"
+      class="output chip"
+      title="播放设备"
+      onclick={onSettings}
+    >
+      <Volume2 size={13} strokeWidth={1.8} />
+      <span>{output?.name ?? "默认输出"}</span>
+    </button>
   </header>
 
   {#if localBlock}
-    <div class="local-warning">
-      <RadioMark />
-      <p>
-        本机正在广播。要收听其他设备，请先在发送页停止广播。
-      </p>
-    </div>
+    <p class="note">本机正在广播，暂不能收听</p>
   {/if}
 
-  {#if listening.length > 0}
-    <section class="mix" aria-labelledby="mix-title">
-      <div class="section-head mix-head">
-        <div class="mix-title-line">
-          <span
-            class="live-dot"
-            class:standby-dot={activeListening.length === 0}
-            aria-hidden="true"
-          ></span>
-          <h2 id="mix-title">{mixTitle}</h2>
-          <span class="mix-count mono">{mixCount}</span>
-        </div>
-        <span class="meta">
-          {activeListening.length > 0
-            ? "输出预缓冲 20 ms"
-            : "输出保持打开，等待广播恢复"}
-        </span>
-      </div>
-
-      <div class="mix-console">
-        <div class="console-head">
-          <span>
-            <span
-              class="console-live"
-              class:muted={activeListening.length === 0}
-            >
-              {activeListening.length > 0 ? "实时" : "守听"}
-            </span>
-            {activeListening.length > 0 ? "声音在这里汇合" : "等待广播恢复"}
-          </span>
-          <span class="console-output">
-            {output?.name ?? "默认输出"}
-          </span>
-        </div>
-
-        {#each listening as stream (stream.senderId)}
-          <div class="stream" class:standby={stream.state === "standby"}>
-            <DeviceIcon platform={platformFor(stream.senderId)} size={17} />
-            <div class="stream-name">
-              <span>{stream.senderAlias}</span>
-              <small>{stream.source}</small>
-            </div>
-            <div class="stream-meter">
-              <LevelMeter level={stream.level} tone="light" bars={18} />
-            </div>
-            <div class="stream-stat stream-stat--buffer">
-              <span>缓冲</span>
-              <b class="mono">
-                {stream.state === "standby" ? "—" : `${stream.bufferMs} ms`}
-              </b>
-            </div>
-            <div class="stream-stat stream-stat--bitrate">
-              <span>码率</span>
-              <b class="mono">
-                {stream.state === "standby" ? "—" : `${stream.bitrateKbps} kbps`}
-              </b>
-            </div>
-            <div
-              class="stream-state"
-              class:waiting={stream.state !== "live"}
-              class:standby={stream.state === "standby"}
-            >
-              <span class="state-dot" aria-hidden="true"></span>
-              {stateLabel(stream)}
-            </div>
-            <button
-              type="button"
-              class="disconnect"
-              aria-label={`断开 ${stream.senderAlias}`}
-              title="断开"
-              onclick={() => onUnsubscribe(stream.senderId)}
-            >
-              <X size={14} strokeWidth={1.7} />
-            </button>
-          </div>
-        {/each}
-
-        <div class="console-foot">
-          {#if activeListening.length > 0}
-            <span>自动缓冲 {bufferTargetLabel}</span>
-            <span>
-              抖动
-              {Math.max(...activeListening.map((item) => item.jitterMs)).toFixed(1)}
-              ms
-            </span>
-            <span>
-              丢包
-              {Math.max(...activeListening.map((item) => item.lossPct)).toFixed(2)}%
-            </span>
-            {#if standbyListening.length > 0}
-              <span>{standbyListening.length} 路继续守听</span>
-            {/if}
-            <span class="console-strategy">链路变差时优先保持连续，平稳后慢慢减回延迟</span>
-          {:else}
-            <span>广播已停止，输出设备保持打开</span>
-            <span class="console-strategy">对方重新开播后会自动重连，无需再次点收听</span>
-          {/if}
-        </div>
-      </div>
-    </section>
-  {:else}
-    <section class="quiet-hero" aria-label="等待收听">
-      <div class="quiet-mark"><Mark size={38} /></div>
-      <div>
-        <p class="quiet-title">还没在听。</p>
-        <p class="quiet-copy">
-          下面出现的每一路广播都可以直接加入；多路声音会在这台设备的
-          <button type="button" class="inline-settings" onclick={onSettings}>
-            {output?.name ?? "输出设备"}
-          </button>
-          上混合播放。
-        </p>
-      </div>
-    </section>
-  {/if}
-
-  <section class="nearby" aria-labelledby="nearby-title">
+  <section class="section">
     <div class="section-head">
-      <h2 id="nearby-title">附近广播</h2>
-      <div class="nearby-actions">
-        <span class="meta">{broadcasting.length} 路声源</span>
+      <h2>附近广播</h2>
+      <span class="count">{entries.length}</span>
+      <div class="tools">
         <button
           type="button"
-          class="scan-button"
+          class="icon-button"
+          class:on={probeOpen}
+          aria-label="按 IP 添加"
+          aria-expanded={probeOpen}
+          title="按 IP 添加"
+          onclick={() => (probeOpen = !probeOpen)}
+        >
+          <Plus size={17} strokeWidth={1.8} />
+        </button>
+        <button
+          type="button"
+          class="icon-button"
+          aria-label="扫描"
+          title="扫描"
           onclick={onScan}
           disabled={scanning}
-          aria-label="重新扫描附近设备"
         >
-          <span class="spin-wrap" class:spin={scanning}>
-            <RefreshCw size={13} />
-          </span>
-          {scanning ? "扫描中" : "扫描"}
+          <span class="spin" class:on={scanning}><RefreshCw size={15} strokeWidth={1.8} /></span>
         </button>
       </div>
     </div>
 
-    {#if broadcasting.length > 0}
-      <div class="broadcast-list">
-        {#each broadcasting as peer (peer.id)}
-          <div class="broadcast-row" class:connected={isConnected(peer.id)}>
-            <DeviceIcon platform={peer.platform} size={21} />
-            <div class="broadcast-copy">
-              <div class="broadcast-name">
-                {peer.alias}
-                {#if isConnected(peer.id)}
-                  <span class="connected-label">已连接</span>
-                {/if}
+    {#if probeOpen}
+      <form class="probe card" onsubmit={submitProbe}>
+        <input
+          class="text-input mono"
+          bind:value={probeAddress}
+          placeholder="192.168.1.24"
+          inputmode="decimal"
+          autocomplete="off"
+          aria-label="对方 IP"
+        />
+        <button type="submit" class="button" disabled={probing || !probeAddress.trim()}>
+          {probing ? "查找中" : "查找"}
+        </button>
+      </form>
+    {/if}
+
+    {#if entries.length > 0}
+      <div class="list">
+        {#each entries as entry (entry.id)}
+          <div class="card row" class:standby={entry.stream?.state === "standby"}>
+            <DeviceIcon platform={entry.platform} active={entry.stream?.state === "live"} />
+            <div class="row-main">
+              <span class="row-title">{entry.alias}</span>
+              {#if entry.stream}
+                <span class="row-sub mono">{streamLine(entry.stream)}</span>
+              {:else}
+                <span class="chips">
+                  <span class="chip">{entry.peer?.broadcast?.source ?? "系统声音"}</span>
+                  {#if entry.peer?.broadcast?.listeners}
+                    <span class="chip">{entry.peer.broadcast.listeners} 人在听</span>
+                  {/if}
+                </span>
+              {/if}
+            </div>
+            {#if entry.stream}
+              <div class="meter">
+                <LevelMeter level={entry.stream.level} tone="accent" bars={12} />
               </div>
-              <p>
-                {peer.broadcast?.source ?? "系统声音"}
-                <span aria-hidden="true">·</span>
-                {peer.broadcast?.listeners === 0
-                  ? "等待第一位听众"
-                  : `${peer.broadcast?.listeners ?? 0} 人在听`}
-                <span aria-hidden="true">·</span>
-                {playedFor(peer)}
-              </p>
-            </div>
-            <div class="source-kind">
-              <span class="source-kind-label">
-                {peer.broadcast?.sourceKind === "microphone" ? "麦克风" : "系统"}
-              </span>
-              <span class="mono">{peer.address}</span>
-            </div>
-            {#if isConnected(peer.id)}
               <button
                 type="button"
-                class="button button--quiet button--small listen-button disconnect-button"
-                onclick={() => onUnsubscribe(peer.id)}
+                class="button button--soft action"
+                onclick={() => onUnsubscribe(entry.id)}
               >
                 断开
               </button>
             {:else}
               <button
                 type="button"
-                class="button button--small listen-button"
+                class="button action"
                 disabled={connectingId !== null || localBlock}
-                onclick={() => onSubscribe(peer.id)}
+                onclick={() => onSubscribe(entry.id)}
               >
-                {#if connectingId === peer.id}
-                  <span class="spin-wrap spin"><RefreshCw size={12} /></span>
-                  连接中
+                {#if connectingId === entry.id}
+                  <span class="spin on"><RefreshCw size={13} /></span>
                 {:else}
-                  <Play size={11} fill="currentColor" strokeWidth={0} />
-                  收听
+                  <Play size={12} fill="currentColor" strokeWidth={0} />
                 {/if}
+                收听
               </button>
             {/if}
           </div>
         {/each}
       </div>
     {:else}
-      <div class="empty-broadcasts">
-        <div class="empty-mark"><Mark size={33} /></div>
-        <div>
-          <p class="empty-title">这张网里暂时没有广播。</p>
-          <p class="empty-copy">
-            在另一台设备打开「发送」，选好音源并开始广播；这里会自动出现。若对方明明在线，请允许应用通过防火墙的专用网络（UDP 53410），或在设置里手动探测对方 IP。
-          </p>
-        </div>
-        <button
-          type="button"
-          class="button button--small"
-          onclick={onScan}
-          disabled={scanning}
-        >
-          <span class="spin-wrap" class:spin={scanning}>
-            <RefreshCw size={13} />
-          </span>
-          {scanning ? "扫描中" : "主动扫描"}
-        </button>
+      <div class="empty">
+        <span class="radar" class:on={scanning}><Mark size={40} /></span>
+        <p>暂无广播</p>
       </div>
     {/if}
 
     {#if idleCount > 0}
-      <p class="idle-line">
-        另有 {idleCount} 台设备在线，尚未广播
-        <span aria-hidden="true">·</span>
-        <span class="mono">{snapshot.network.interface ?? "LAN"}</span>
-      </p>
+      <p class="foot">另有 {idleCount} 台设备在线</p>
     {/if}
-  </section>
-
-  <section class="receive-note">
-    <Settings2 size={15} strokeWidth={1.6} />
-    <p>
-      输出设备与延迟策略在设置里。默认全程自动：不会为了低延迟牺牲连续性，也不会让缓冲无限变厚。
-    </p>
-    <button type="button" onclick={onSettings}>设置</button>
   </section>
 </div>
 
-{#snippet RadioMark()}
-  <span class="warning-mark" aria-hidden="true">
-    <span></span>
-  </span>
-{/snippet}
-
 <style>
-  .page {
-    padding: 38px 44px 56px;
-  }
-
-  .receive-hero {
-    display: flex;
-    align-items: flex-end;
-    justify-content: space-between;
-    gap: 32px;
-    padding-bottom: 27px;
-    border-bottom: 1px solid var(--rule);
-  }
-
-  .hero-main {
-    min-width: 0;
-  }
-
-  .receive-hero h1 {
-    overflow: hidden;
-    margin-top: 13px;
-    font-size: clamp(42px, 5.2vw, 66px);
-    font-weight: 630;
-    line-height: 1;
-    letter-spacing: -0.055em;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .discovery {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 7px;
-    margin-top: 14px;
-    color: var(--ink-secondary);
-    font-size: 12px;
-  }
-
-  .live-dot {
-    display: inline-block;
-    width: 6px;
-    height: 6px;
-    flex: none;
-    border-radius: 50%;
-    background: var(--accent);
-  }
-
-  .live-dot.standby-dot,
-  .stream-state.standby .state-dot {
-    background: #7d8177;
-  }
-
-  .slash {
-    color: var(--rule-strong);
-  }
-
-  .discovery .mono {
-    color: var(--ink-muted);
-    font-size: 11px;
-  }
-
-  .output-block {
-    display: flex;
-    width: 260px;
-    flex: none;
-    flex-direction: column;
-    align-items: flex-start;
-    padding-bottom: 2px;
-  }
-
-  .output-label {
-    color: var(--ink-muted);
-    font-size: 11px;
-  }
-
-  .output-button {
-    display: flex;
-    max-width: 100%;
-    align-items: center;
-    gap: 5px;
-    margin-top: 5px;
-    padding: 2px 0;
-    color: var(--ink);
-    font-size: 13px;
-    font-weight: 600;
-    letter-spacing: -0.01em;
-    text-align: left;
-  }
-
-  .output-button span {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .output-button:hover {
-    color: var(--accent);
-  }
-
-  .output-meta {
-    margin-top: 4px;
-    color: var(--ink-muted);
-    font-size: 10px;
-  }
-
-  .local-warning {
+  .identity {
     display: flex;
     align-items: center;
-    gap: 12px;
-    margin-top: 20px;
-    padding: 11px 13px;
-    border: 1px solid var(--rule);
-    border-left: 2px solid var(--accent);
-    background: var(--surface);
-    color: var(--ink-secondary);
-    font-size: 12px;
-    line-height: 1.6;
-  }
-
-  .warning-mark {
-    display: grid;
-    width: 24px;
-    height: 24px;
-    flex: none;
-    place-items: center;
-    border: 1px solid var(--rule-strong);
-    border-radius: 50%;
-  }
-
-  .warning-mark span {
-    width: 5px;
-    height: 5px;
-    border-radius: 50%;
-    background: var(--accent);
-  }
-
-  .quiet-hero {
-    display: flex;
-    align-items: center;
-    gap: 16px;
-    margin-top: 26px;
-    padding: 23px 0 24px;
-    border-bottom: 1px solid var(--rule);
-    --mark-bg: #e6e2d7;
-    --mark-ink: #797d71;
-  }
-
-  .quiet-title {
-    color: var(--ink);
-    font-size: 14px;
-    font-weight: 620;
-    letter-spacing: -0.01em;
-  }
-
-  .quiet-copy {
-    max-width: 620px;
-    margin-top: 5px;
-    color: var(--ink-secondary);
-    font-size: 13px;
-    line-height: 1.7;
-  }
-
-  .inline-settings {
-    padding: 0;
-    color: var(--ink);
-    font-size: inherit;
-    text-decoration: underline;
-    text-decoration-color: var(--rule-strong);
-    text-underline-offset: 3px;
-  }
-
-  .inline-settings:hover {
-    color: var(--accent);
-  }
-
-  .mix {
-    margin-top: 30px;
-  }
-
-  .mix-title-line {
-    display: flex;
-    align-items: center;
-    gap: 9px;
-  }
-
-  .mix-count {
-    color: var(--ink-muted);
-    font-size: 10px;
-  }
-
-  .mix-head {
-    margin-bottom: 11px;
-  }
-
-  .mix-console {
-    color: #ece9de;
-    background: var(--ink);
-    border-radius: 3px;
-  }
-
-  .console-head {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 20px;
-    padding: 14px 20px;
-    border-bottom: 1px solid #363931;
-    color: #a4a89b;
-    font-size: 11px;
-  }
-
-  .console-head > span {
-    display: flex;
-    align-items: center;
-    gap: 9px;
-  }
-
-  .console-live {
-    color: var(--accent);
-    font-family: var(--mono);
-    font-size: 10px;
-    letter-spacing: 0.04em;
-  }
-
-  .console-live.muted {
-    color: #a4a89b;
-  }
-
-  .console-output {
-    overflow: hidden;
-    max-width: 45%;
-    color: #f1eee3;
-    font-family: var(--mono);
-    font-size: 10px;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .stream {
-    display: grid;
-    grid-template-columns: 25px minmax(130px, 1fr) minmax(56px, 0.6fr) repeat(2, minmax(54px, auto)) 76px 27px;
     gap: 14px;
-    align-items: center;
-    min-height: 66px;
-    padding: 8px 20px;
-    border-bottom: 1px solid #363931;
+    margin-bottom: 22px;
   }
 
-  .stream :global(.device-icon) {
-    width: 24px;
-    height: 24px;
-    color: #898d81;
-  }
-
-  .stream-name {
-    display: flex;
+  .identity-copy {
     min-width: 0;
-    flex-direction: column;
-    gap: 3px;
-  }
-
-  .stream-name span {
-    overflow: hidden;
-    color: #f4f1e7;
-    font-size: 13px;
-    font-weight: 590;
-    letter-spacing: -0.01em;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .stream-name small {
-    overflow: hidden;
-    color: #8f9387;
-    font-size: 10px;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .stream-meter {
-    padding: 0 2px;
-  }
-
-  .stream-stat {
-    display: flex;
-    flex-direction: column;
-    gap: 3px;
-  }
-
-  .stream-stat span {
-    color: #85897e;
-    font-size: 10px;
-  }
-
-  .stream-stat b {
-    color: #d9d4c7;
-    font-size: 10px;
-    font-weight: 400;
-  }
-
-  .stream-state {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    color: #a4a89b;
-    font-size: 10px;
-    white-space: nowrap;
-  }
-
-  .state-dot {
-    width: 5px;
-    height: 5px;
-    flex: none;
-    border-radius: 50%;
-    background: var(--accent);
-  }
-
-  .stream-state.waiting {
-    color: #a4a89b;
-  }
-
-  .stream-state.waiting .state-dot {
-    background: #85897e;
-  }
-
-  .stream.standby .stream-name span {
-    color: #c8c4b8;
-  }
-
-  .disconnect {
-    display: grid;
-    width: 27px;
-    height: 27px;
-    place-items: center;
-    border: 1px solid #3c3f37;
-    border-radius: 2px;
-    color: #8f9387;
-    transition:
-      color 150ms ease,
-      border-color 150ms ease;
-  }
-
-  .disconnect:hover {
-    color: var(--accent);
-    border-color: var(--accent);
-  }
-
-  .console-foot {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 18px;
-    padding: 12px 20px;
-    color: #85897e;
-    font-family: var(--mono);
-    font-size: 10px;
-  }
-
-  .console-strategy {
-    margin-left: auto;
-    font-family: inherit;
-    font-size: 10px;
-  }
-
-  .nearby {
-    margin-top: 34px;
-  }
-
-  .nearby-actions {
-    display: flex;
-    align-items: center;
-    gap: 16px;
-  }
-
-  .scan-button {
-    display: flex;
-    align-items: center;
-    gap: 5px;
-    padding: 3px 0;
-    color: var(--ink-secondary);
-    font-size: 11px;
-  }
-
-  .scan-button:hover {
-    color: var(--ink);
-  }
-
-  .broadcast-list {
-    border-top: 1px solid var(--rule);
-  }
-
-  .broadcast-row {
-    display: grid;
-    grid-template-columns: 34px minmax(150px, 1fr) minmax(105px, auto) 92px;
-    gap: 16px;
-    align-items: center;
-    min-height: 67px;
-    padding: 8px 0;
-    border-bottom: 1px solid var(--rule);
-  }
-
-  .broadcast-row :global(.device-icon) {
-    width: 28px;
-    height: 28px;
-  }
-
-  .broadcast-copy {
-    min-width: 0;
-  }
-
-  .broadcast-name {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    color: var(--ink);
-    font-size: 13px;
-    font-weight: 600;
-    letter-spacing: -0.01em;
-  }
-
-  .connected-label {
-    color: var(--accent);
-    font-family: var(--mono);
-    font-size: 10px;
-    font-weight: 400;
-  }
-
-  .broadcast-copy p {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 6px;
-    margin-top: 4px;
-    color: var(--ink-muted);
-    font-size: 11px;
-  }
-
-  .source-kind {
-    display: flex;
-    flex-direction: column;
-    align-items: flex-end;
-    gap: 4px;
-    color: var(--ink-muted);
-    font-size: 10px;
-  }
-
-  .source-kind-label {
-    color: var(--ink-secondary);
-    font-family: var(--mono);
-    font-size: 10px;
-    letter-spacing: 0.03em;
-  }
-
-  .source-kind .mono {
-    font-size: 10px;
-  }
-
-  .listen-button {
-    width: 92px;
-    justify-self: end;
-  }
-
-  .disconnect-button {
-    color: var(--ink-muted);
-  }
-
-  .disconnect-button:hover {
-    color: var(--ink);
-  }
-
-  .broadcast-row.connected {
-    background: var(--surface);
-  }
-
-  .empty-broadcasts {
-    display: flex;
-    align-items: center;
-    gap: 15px;
-    padding: 25px 0 26px;
-    border-top: 1px solid var(--rule);
-    border-bottom: 1px solid var(--rule);
-    --mark-bg: #e6e2d7;
-    --mark-ink: #777b70;
-  }
-
-  .empty-broadcasts > div:nth-child(2) {
     flex: 1;
   }
 
-  .empty-title {
-    font-size: 13px;
-    font-weight: 600;
-  }
-
-  .empty-copy {
-    max-width: 510px;
-    margin-top: 4px;
-    color: var(--ink-secondary);
-    font-size: 11px;
-    line-height: 1.7;
-  }
-
-  .idle-line {
-    padding-top: 14px;
-    color: var(--ink-muted);
-    font-size: 10px;
-  }
-
-  .idle-line span {
-    padding: 0 3px;
-  }
-
-  .receive-note {
-    display: flex;
-    align-items: center;
-    gap: 9px;
-    margin-top: 32px;
-    padding-top: 16px;
-    border-top: 1px solid var(--rule);
-    color: var(--ink-muted);
-    font-size: 10px;
-    line-height: 1.6;
-  }
-
-  .receive-note p {
-    max-width: 690px;
-  }
-
-  .receive-note button {
-    margin-left: auto;
-    padding: 3px 0;
-    color: var(--ink-secondary);
-    font-size: 10px;
-    text-decoration: underline;
-    text-decoration-color: var(--rule-strong);
-    text-underline-offset: 3px;
+  .identity h1 {
+    overflow: hidden;
+    font-size: 22px;
+    line-height: 1.2;
+    text-overflow: ellipsis;
     white-space: nowrap;
   }
 
-  .receive-note button:hover {
-    color: var(--ink);
+  .identity p {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    margin-top: 3px;
+    color: var(--ink-3);
+    font-size: 12px;
   }
 
-  .spin-wrap {
-    display: inline-flex;
+  .output {
+    max-width: 40%;
+    gap: 5px;
+    height: 26px;
+    padding: 0 10px;
+    border-radius: 13px;
+    background: var(--card);
+    transition: background-color 140ms ease;
   }
 
-  .spin-wrap.spin {
-    animation: spin 900ms linear infinite;
+  .output:hover {
+    background: var(--card-hover);
   }
 
-  @keyframes spin {
+  .output span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .output :global(svg) {
+    flex: none;
+  }
+
+  .note {
+    margin: -8px 0 18px;
+    padding: 9px 12px;
+    border-radius: var(--radius-sm);
+    color: var(--on-accent-soft);
+    background: var(--accent-soft);
+    font-size: 12px;
+  }
+
+  .meter {
+    width: 64px;
+    flex: none;
+  }
+
+  .row.standby {
+    opacity: 0.62;
+  }
+
+  .chips {
+    display: flex;
+    overflow: hidden;
+    gap: 5px;
+  }
+
+  .action {
+    min-width: 72px;
+  }
+
+  .probe {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 8px;
+    padding: 8px;
+  }
+
+  .radar {
+    position: relative;
+    display: grid;
+    place-items: center;
+    margin-bottom: 4px;
+  }
+
+  /* 秋澄むや 輪をひろげては 声を待つ */
+  .radar::after {
+    position: absolute;
+    inset: -6px;
+    border: 1.5px solid var(--accent);
+    border-radius: 16px;
+    content: "";
+    opacity: 0;
+  }
+
+  .radar.on::after {
+    animation: ripple 1.2s ease-out infinite;
+  }
+
+  @keyframes ripple {
+    from {
+      opacity: 0.55;
+      scale: 0.85;
+    }
     to {
-      rotate: 360deg;
+      opacity: 0;
+      scale: 1.35;
     }
   }
 
-  @media (max-width: 1120px) {
-    .page {
-      padding: 32px 32px 48px;
-    }
-
-    .stream {
-      grid-template-columns: 25px minmax(120px, 1fr) minmax(50px, 0.5fr) repeat(2, minmax(50px, auto)) 68px 27px;
-    }
+  .foot {
+    margin-top: 10px;
+    color: var(--ink-3);
+    font-size: 12px;
+    text-align: center;
   }
 
-  @media (max-width: 880px) {
-    .receive-hero {
-      align-items: flex-start;
-      flex-direction: column;
-      gap: 20px;
-    }
-
-    .output-block {
-      width: auto;
-    }
-
-    .stream {
-      grid-template-columns: 25px minmax(110px, 1fr) minmax(50px, 0.5fr) 66px 27px;
-    }
-
-    .stream-stat {
+  @media (max-width: 480px) {
+    .meter,
+    .output {
       display: none;
-    }
-
-    .console-strategy {
-      margin-left: 0;
-    }
-
-    .broadcast-row {
-      grid-template-columns: 34px minmax(130px, 1fr) 92px;
-    }
-
-    .source-kind {
-      display: none;
-    }
-  }
-
-  @media (max-width: 680px) {
-    .page {
-      padding: 24px 20px 38px;
-    }
-
-    .receive-hero h1 {
-      white-space: normal;
-    }
-
-    .mix-head {
-      align-items: flex-start;
-      flex-direction: column;
-      gap: 5px;
-    }
-
-    .stream {
-      grid-template-columns: 24px minmax(100px, 1fr) 66px 26px;
-      gap: 10px;
-      padding: 9px 13px;
-    }
-
-    .stream-meter {
-      display: none;
-    }
-
-    .empty-broadcasts {
-      align-items: flex-start;
-      flex-wrap: wrap;
-    }
-
-    .broadcast-row {
-      grid-template-columns: 30px minmax(110px, 1fr) 82px;
-      gap: 10px;
-    }
-
-    .listen-button {
-      width: 82px;
-    }
-
-    .receive-note {
-      align-items: flex-start;
-    }
-
-    .receive-note button {
-      margin-left: 0;
     }
   }
 </style>

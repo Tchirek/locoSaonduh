@@ -1,300 +1,146 @@
 <script lang="ts">
   import { Headphones, Radio, Settings } from "@lucide/svelte";
-  import type { Identity, Network, Tab } from "../types";
+  import type { Tab } from "../types";
   import Mark from "./Mark.svelte";
 
   let {
     tab,
     onTab,
-    identity,
-    network,
-    available = 0,
     listening = 0,
-    onSettings,
+    live = false,
   }: {
     tab: Tab;
     onTab: (tab: Tab) => void;
-    identity: Identity;
-    network: Network;
-    available?: number;
     listening?: number;
-    onSettings: () => void;
+    live?: boolean;
   } = $props();
 
-  let online = $derived(Boolean(network.ip));
+  const items = [
+    { id: "receive", label: "接收", icon: Headphones },
+    { id: "send", label: "发送", icon: Radio },
+    { id: "settings", label: "设置", icon: Settings },
+  ] as const;
 </script>
 
-<aside class="rail">
-  <div class="brand">
-    <Mark size={31} />
-    <div class="brand-type">
-      <span class="wordmark">locoSaonduh</span>
-      <span class="sub">局域网音频</span>
-    </div>
-  </div>
-
-  <nav aria-label="主要模式">
+<nav class="rail" aria-label="主要模式">
+  <div class="brand"><Mark size={30} /></div>
+  {#each items as item (item.id)}
     <button
       type="button"
-      class:active={tab === "send"}
-      aria-current={tab === "send" ? "page" : undefined}
-      onclick={() => onTab("send")}
+      class="item"
+      class:active={tab === item.id}
+      aria-current={tab === item.id ? "page" : undefined}
+      onclick={() => onTab(item.id)}
     >
-      <Radio size={19} strokeWidth={1.65} />
-      <span class="label">发送</span>
+      <span class="pill">
+        <item.icon size={20} strokeWidth={1.7} />
+        {#if item.id === "receive" && listening > 0}
+          <span class="badge mono">{listening}</span>
+        {:else if item.id === "send" && live}
+          <span class="badge badge--dot" aria-hidden="true"></span>
+        {/if}
+      </span>
+      <span class="label">{item.label}</span>
     </button>
-    <button
-      type="button"
-      class:active={tab === "receive"}
-      aria-current={tab === "receive" ? "page" : undefined}
-      onclick={() => onTab("receive")}
-    >
-      <Headphones size={19} strokeWidth={1.65} />
-      <span class="label">接收</span>
-      {#if listening > 0}
-        <span class="rail-meta">{listening}</span>
-      {:else if available > 0}
-        <span class="rail-meta">{available}</span>
-      {/if}
-    </button>
-  </nav>
-
-  <div class="rail-foot">
-    <div class="network" title={network.interface ?? "未连接网络"}>
-      <span class:offline={!online} class="dot" aria-hidden="true"></span>
-      <span class="network-label">{online ? "局域网在线" : "等待网络"}</span>
-    </div>
-    <div class="address mono">
-      {network.ip ?? "—"}<span>:{network.port}</span>
-    </div>
-    <div class="identity">
-      <span class="alias" title={identity.alias}>{identity.alias}</span>
-      <button
-        type="button"
-        class="settings-button"
-        aria-label="设置"
-        title="设置"
-        onclick={onSettings}
-      >
-        <Settings size={17} strokeWidth={1.7} />
-      </button>
-    </div>
-  </div>
-</aside>
+  {/each}
+</nav>
 
 <style>
   .rail {
     display: flex;
-    width: var(--rail);
-    min-width: var(--rail);
-    height: 100%;
+    width: 76px;
+    flex: none;
     flex-direction: column;
-    padding: 26px 18px 18px;
-    color: #e8e4d9;
-    background: var(--ink);
+    align-items: center;
+    gap: 6px;
+    padding: 16px 0;
+    background: var(--bg);
+    border-right: 1px solid var(--line);
   }
 
   .brand {
-    display: flex;
-    align-items: center;
-    gap: 11px;
-    padding: 0 7px 34px;
-    --mark-bg: #f2f0e9;
-    --mark-ink: #191b18;
+    padding-bottom: 14px;
   }
 
-  .brand-type {
+  .item {
     display: flex;
-    min-width: 0;
+    width: 64px;
     flex-direction: column;
-    gap: 2px;
-  }
-
-  .wordmark {
-    overflow: hidden;
-    color: #f4f1e8;
-    font-family: var(--display);
-    font-size: 18px;
-    font-weight: 690;
-    letter-spacing: -0.05em;
-    text-overflow: clip;
-    white-space: nowrap;
-  }
-
-  .sub {
-    color: #8f9387;
-    font-size: 11px;
-    font-weight: 500;
-    letter-spacing: 0.08em;
-  }
-
-  nav {
-    display: flex;
-    flex-direction: column;
-    gap: 3px;
-  }
-
-  nav button {
-    display: flex;
-    width: 100%;
-    min-height: 43px;
     align-items: center;
-    gap: 12px;
-    padding: 0 11px;
-    border-left: 2px solid transparent;
-    border-radius: 2px;
-    color: #a8ac9f;
-    text-align: left;
-    transition:
-      color 150ms ease,
-      background-color 150ms ease;
+    gap: 4px;
+    padding: 4px 0;
+    color: var(--ink-2);
   }
 
-  nav button:hover {
-    color: #f2f0e9;
-    background: #232620;
+  .pill {
+    position: relative;
+    display: grid;
+    width: 52px;
+    height: 30px;
+    place-items: center;
+    border-radius: 15px;
+    transition: background-color 140ms ease;
   }
 
-  nav button.active {
-    color: #f8f5ec;
-    background: #242721;
-    border-left-color: var(--accent);
+  .item:hover .pill {
+    background: var(--card-hover);
+  }
+
+  .item.active {
+    color: var(--ink);
+  }
+
+  .item.active .pill {
+    color: var(--on-accent-soft);
+    background: var(--accent-soft);
   }
 
   .label {
-    flex: 1;
-    font-size: 14px;
-    font-weight: 560;
-    letter-spacing: -0.01em;
-  }
-
-  .rail-meta {
-    color: #8d9185;
-    font-family: var(--mono);
-    font-size: 11px;
-  }
-
-  nav button.active .rail-meta {
-    color: var(--accent);
-  }
-
-  .rail-foot {
-    margin-top: auto;
-    padding-top: 22px;
-    border-top: 1px solid #32352e;
-  }
-
-  .network {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    color: #afb3a6;
     font-size: 12px;
+    font-weight: 500;
   }
 
-  .dot {
-    display: block;
-    width: 6px;
-    height: 6px;
-    flex: none;
-    border-radius: 50%;
-    background: var(--accent);
+  .item.active .label {
+    font-weight: 650;
   }
 
-  .dot.offline {
-    background: #72766c;
-  }
-
-  .address {
-    margin-top: 7px;
-    padding-left: 14px;
-    overflow: hidden;
-    color: #7e8277;
-    font-size: 11px;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .address span {
-    color: #5c6056;
-  }
-
-  .identity {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    margin-top: 18px;
-    padding-top: 14px;
-    border-top: 1px solid #32352e;
-  }
-
-  .alias {
-    overflow: hidden;
-    flex: 1;
-    color: #e8e4d9;
-    font-size: 13px;
-    font-weight: 560;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .settings-button {
+  .badge {
+    position: absolute;
+    top: 1px;
+    right: 9px;
     display: grid;
-    width: 30px;
-    height: 30px;
-    flex: none;
+    min-width: 16px;
+    height: 16px;
     place-items: center;
-    border: 1px solid transparent;
-    border-radius: 2px;
-    color: #898d81;
-    transition:
-      color 150ms ease,
-      background-color 150ms ease,
-      border-color 150ms ease;
+    padding: 0 4px;
+    border-radius: 8px;
+    color: var(--on-accent);
+    background: var(--accent);
+    font-size: 10px;
+    font-weight: 600;
   }
 
-  .settings-button:hover {
-    color: #f2f0e9;
-    background: #282b25;
-    border-color: #3a3d35;
+  .badge--dot {
+    top: 4px;
+    right: 13px;
+    min-width: 8px;
+    width: 8px;
+    height: 8px;
+    padding: 0;
   }
 
-  @media (max-width: 950px) {
+  @media (max-width: 560px) {
     .rail {
-      width: 76px;
-      min-width: 76px;
-      align-items: center;
-      padding: 24px 12px 18px;
+      width: 100%;
+      flex-direction: row;
+      justify-content: space-around;
+      padding: 6px 0 8px;
+      border-top: 1px solid var(--line);
+      border-right: 0;
     }
 
     .brand {
-      padding: 0 0 30px;
-    }
-
-    .brand-type,
-    .label,
-    .rail-meta,
-    .network-label,
-    .address,
-    .alias {
       display: none;
-    }
-
-    nav {
-      width: 100%;
-    }
-
-    nav button {
-      justify-content: center;
-      padding: 0;
-    }
-
-    .network {
-      justify-content: center;
-    }
-
-    .identity {
-      justify-content: center;
     }
   }
 </style>

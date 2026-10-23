@@ -5,7 +5,7 @@
     bars = 28,
   }: {
     level?: number;
-    tone?: "ink" | "light" | "accent";
+    tone?: "ink" | "accent";
     bars?: number;
   } = $props();
 
@@ -30,30 +30,23 @@
   .meter {
     display: flex;
     width: 100%;
-    height: 18px;
+    height: 16px;
     align-items: center;
-    gap: 3px;
+    gap: 2px;
+    color: var(--ink);
   }
 
   span {
-    width: 2px;
-    height: 5px;
+    height: 6px;
     flex: 1;
+    border-radius: 1px;
     background: currentColor;
-    opacity: 0.15;
+    opacity: 0.14;
     transition: opacity 120ms linear;
   }
 
   span.on {
     opacity: 1;
-  }
-
-  .meter {
-    color: var(--ink);
-  }
-
-  .light {
-    color: var(--paper);
   }
 
   .accent {

@@ -398,7 +398,7 @@ window.setInterval(() => {
       if (broadcast.listeners.length < 2) {
         broadcast.listeners.push({
           alias: broadcast.listeners.length ? "Pixel 9" : "Mara 的 MacBook",
-          id: "preview-listener",
+          id: `preview-listener-${broadcast.listeners.length}`,
           address: "192.168.31.18",
           connectedMs: tick * 260,
           bufferMs: 40,
