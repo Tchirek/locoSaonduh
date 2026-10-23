@@ -16,7 +16,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow};
 
-use crate::adaptive::{FRAME_DURATION, QualityController, QualityTier, StreamBuffer};
+use crate::adaptive::{FRAME_DURATION, QualityController, StreamBuffer};
 use crate::audio::{
     AudioSource, CaptureGuard, CaptureTaps, Decoder, Encoder, OpenCapture, OutputDevice,
     PlaybackSink, SourceKind, list_microphones, list_output_devices, open_capture, system_source,
@@ -33,7 +33,7 @@ use crate::protocol::{
 use crate::settings::{SavedListen, Settings};
 use crate::state::{
     BroadcastOwnView, BroadcastView, IdentityView, ListenerView, ListeningView, NetworkView,
-    NoticeView, PeerView, PrefsView, SendQualityView, Snapshot, VirtualMicView,
+    NoticeView, PeerView, PrefsView, Snapshot, VirtualMicView,
 };
 
 const ANNOUNCE_EVERY: Duration = Duration::from_secs(2);
@@ -426,8 +426,6 @@ struct SenderControl {
     stop: AtomicBool,
     bitrate_kbps: AtomicU32,
     loss_x100: AtomicU32,
-    packets_sent: AtomicU64,
-    send_errors: AtomicU64,
 }
 
 impl SenderControl {
@@ -436,18 +434,14 @@ impl SenderControl {
             stop: AtomicBool::new(false),
             bitrate_kbps: AtomicU32::new(112),
             loss_x100: AtomicU32::new(0),
-            packets_sent: AtomicU64::new(0),
-            send_errors: AtomicU64::new(0),
         }
     }
 }
 
 #[derive(Clone)]
 struct ListenerEntry {
-    id: String,
     alias: String,
     address: SocketAddr,
-    joined_at: Instant,
     last_seen: Instant,
     report: Option<Feedback>,
 }
@@ -483,7 +477,6 @@ struct ReceiverStream {
     address: SocketAddr,
     buffer: StreamBuffer,
     decoder: Decoder,
-    bitrate_kbps: u32,
     last_packet: Instant,
     level: f32,
     to_virtual: bool,
@@ -1286,7 +1279,6 @@ impl Coordinator {
                     address: from,
                     buffer: StreamBuffer::new(now),
                     decoder,
-                    bitrate_kbps: 112,
                     last_packet: now,
                     level: 0.0,
                     to_virtual: false,
@@ -1379,7 +1371,6 @@ impl Coordinator {
         stream
             .buffer
             .insert_pair(packet.seq, packet.current, packet.previous, Instant::now());
-        stream.bitrate_kbps = packet.bitrate_kbps as u32;
         stream.last_packet = Instant::now();
     }
 
@@ -1493,10 +1484,8 @@ impl Coordinator {
                 return;
             }
             listeners.push(ListenerEntry {
-                id: subscribe.id,
                 alias: subscribe.alias,
                 address: SocketAddr::new(from.ip(), from.port()),
-                joined_at: Instant::now(),
                 last_seen: Instant::now(),
                 report: None,
             });
@@ -1505,7 +1494,6 @@ impl Coordinator {
             .find(|listener| listener.address.ip() == from.ip())
         {
             listener.alias = subscribe.alias;
-            listener.id = subscribe.id;
             listener.last_seen = Instant::now();
         }
         drop(listeners);
@@ -1849,10 +1837,6 @@ impl Coordinator {
     }
 
     fn build_snapshot(&mut self) -> Snapshot {
-        let hostname = hostname::get()
-            .ok()
-            .and_then(|name| name.into_string().ok())
-            .unwrap_or_else(|| "unknown".to_owned());
         let now = Instant::now();
         let listened = self
             .intents
@@ -1865,10 +1849,8 @@ impl Coordinator {
             .map(|peer| PeerView {
                 id: peer.id.clone(),
                 alias: peer.alias.clone(),
-                hostname: peer.hostname.clone(),
                 platform: peer.platform.clone(),
                 address: peer.address.ip().to_string(),
-                age_ms: now.saturating_duration_since(peer.last_seen).as_millis() as u64,
                 streams: peer
                     .streams
                     .iter()
@@ -1894,28 +1876,25 @@ impl Coordinator {
                     .map(|listeners| {
                         listeners
                             .iter()
-                            .map(|listener| listener_view(listener, now))
+                            .map(|listener| ListenerView {
+                                alias: listener.alias.clone(),
+                                address: listener.address.ip().to_string(),
+                                buffer_ms: listener
+                                    .report
+                                    .as_ref()
+                                    .map_or(0, |report| report.buffer_ms),
+                            })
                             .collect()
                     })
                     .unwrap_or_default();
-                let quality = runtime.quality.state();
-                let level = f32::from_bits(runtime.taps.peak.swap(0, Ordering::Relaxed));
                 BroadcastOwnView {
                     session: runtime.session,
                     kind: runtime.kind.label().to_owned(),
                     source: runtime.source.name.clone(),
                     started_at_ms: runtime.started_at_ms,
                     listeners,
-                    quality: SendQualityView {
-                        mode: "auto".to_owned(),
-                        tier: quality_tier_key(quality.tier).to_owned(),
-                        tier_label: quality.tier.label().to_owned(),
-                        bitrate_kbps: quality.bitrate_kbps,
-                        loss_pct: quality.loss_pct,
-                        jitter_ms: quality.jitter_ms,
-                    },
-                    level,
-                    packets_sent: runtime.control.packets_sent.load(Ordering::Relaxed),
+                    bitrate_kbps: runtime.quality.state().bitrate_kbps,
+                    level: f32::from_bits(runtime.taps.peak.swap(0, Ordering::Relaxed)),
                     excludes_self: runtime.excludes_self,
                 }
             })
@@ -1965,10 +1944,7 @@ impl Coordinator {
                     kind: stream.kind.label().to_owned(),
                     source: stream.source.clone(),
                     state: state.to_owned(),
-                    bitrate_kbps: stream.bitrate_kbps,
                     buffer_ms: counters.buffered_ms,
-                    target_ms: counters.target_ms,
-                    jitter_ms: counters.jitter_ms,
                     loss_pct: counters.loss_ratio() * 100.0,
                     level: stream.level,
                     output: match (&virtual_name, stream.to_virtual) {
@@ -1990,10 +1966,7 @@ impl Coordinator {
                 kind: intent.kind.label().to_owned(),
                 source: intent.source.clone(),
                 state: "standby".to_owned(),
-                bitrate_kbps: 0,
                 buffer_ms: 0,
-                target_ms: 0,
-                jitter_ms: 0.0,
                 loss_pct: 0.0,
                 level: 0.0,
                 output: output_name.clone(),
@@ -2026,14 +1999,11 @@ impl Coordinator {
             identity: IdentityView {
                 id: self.settings.id.clone(),
                 alias: self.settings.alias.clone(),
-                hostname,
-                platform: std::env::consts::OS.to_owned(),
             },
             network: NetworkView {
                 ip: self.local.ip.clone(),
                 interface: self.local.interface.clone(),
                 port: self.port,
-                discovery: "UDP 组播 + 定向广播 + 子网扫描".to_owned(),
             },
             peers,
             broadcasts,
@@ -2059,41 +2029,6 @@ impl Coordinator {
             },
             notice,
         }
-    }
-}
-
-fn listener_view(listener: &ListenerEntry, now: Instant) -> ListenerView {
-    let loss = listener
-        .report
-        .as_ref()
-        .map(|report| {
-            let total = report.received + report.lost;
-            if total == 0 {
-                0.0
-            } else {
-                report.lost as f64 / total as f64 * 100.0
-            }
-        })
-        .unwrap_or(0.0);
-    ListenerView {
-        alias: listener.alias.clone(),
-        id: listener.id.clone(),
-        address: listener.address.ip().to_string(),
-        connected_ms: now
-            .saturating_duration_since(listener.joined_at)
-            .as_millis() as u64,
-        buffer_ms: listener
-            .report
-            .as_ref()
-            .map(|report| report.buffer_ms)
-            .unwrap_or(0),
-        jitter_ms: listener
-            .report
-            .as_ref()
-            .map(|report| report.jitter_us as f64 / 1_000.0)
-            .unwrap_or(0.0),
-        loss_pct: loss,
-        reported: listener.report.is_some(),
     }
 }
 
@@ -2175,10 +2110,7 @@ fn sender_loop(job: SenderJob) {
                 );
                 for address in addresses {
                     if let Err(error) = socket.send_to(&packet, address) {
-                        control.send_errors.fetch_add(1, Ordering::Relaxed);
                         log::debug!("audio send to {address} failed: {error}");
-                    } else {
-                        control.packets_sent.fetch_add(1, Ordering::Relaxed);
                     }
                 }
             }
@@ -2293,14 +2225,6 @@ fn epoch_ms() -> u64 {
         .unwrap_or(0)
 }
 
-fn quality_tier_key(tier: QualityTier) -> &'static str {
-    match tier {
-        QualityTier::Lean => "lean",
-        QualityTier::Balanced => "balanced",
-        QualityTier::Studio => "studio",
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2310,12 +2234,6 @@ mod tests {
         for _ in 0..1_000 {
             assert_ne!(random_session(), 0);
         }
-    }
-
-    #[test]
-    fn quality_keys_are_stable_wire_values() {
-        assert_eq!(quality_tier_key(QualityTier::Lean), "lean");
-        assert_eq!(quality_tier_key(QualityTier::Studio), "studio");
     }
 
     #[test]

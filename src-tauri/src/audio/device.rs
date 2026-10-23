@@ -10,7 +10,6 @@ use rtrb::RingBuffer;
 use serde::Serialize;
 
 use super::system;
-use crate::protocol::SAMPLE_RATE;
 
 pub const SYSTEM_SOURCE_ID: &str = "system|*";
 
@@ -53,8 +52,6 @@ pub struct OutputDevice {
     pub id: String,
     pub name: String,
     pub is_default: bool,
-    pub sample_rate: u32,
-    pub channels: u16,
 }
 
 pub fn system_source() -> AudioSource {
@@ -113,16 +110,10 @@ pub fn list_output_devices() -> Vec<OutputDevice> {
             if system::is_private_sink(&id) {
                 continue;
             }
-            let config = device.default_output_config().ok();
             devices.push(OutputDevice {
                 id,
                 name: description.name().to_owned(),
                 is_default: default.as_ref() == Some(&device),
-                sample_rate: config
-                    .as_ref()
-                    .map(|c| c.sample_rate())
-                    .unwrap_or(SAMPLE_RATE),
-                channels: config.as_ref().map(|c| c.channels()).unwrap_or(2),
             });
         }
     }

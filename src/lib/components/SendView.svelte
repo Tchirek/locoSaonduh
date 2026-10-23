@@ -33,12 +33,11 @@
   let audience = $derived.by(() => {
     const people = new Map<
       string,
-      { id: string; alias: string; address: string; bufferMs: number; kinds: Kind[] }
+      { alias: string; address: string; bufferMs: number; kinds: Kind[] }
     >();
     for (const broadcast of snapshot.broadcasts) {
       for (const listener of broadcast.listeners) {
         const entry = people.get(listener.address) ?? {
-          id: listener.id,
           alias: listener.alias,
           address: listener.address,
           bufferMs: 0,
@@ -164,7 +163,7 @@
         <span class="tile-meter"><LevelMeter level={live.level} tone="accent" bars={18} /></span>
         <span class="tile-meta mono">
           <Users size={12} />{live.listeners.length}
-          <span>·</span>{live.quality.bitrateKbps} kbps
+          <span>·</span>{live.bitrateKbps} kbps
         </span>
       {/if}
     </button>

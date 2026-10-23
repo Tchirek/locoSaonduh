@@ -20,35 +20,26 @@ export interface Snapshot {
 export interface Identity {
   id: string;
   alias: string;
-  hostname: string;
-  platform: string;
 }
 
 export interface Network {
   ip: string | null;
   interface: string | null;
   port: number;
-  discovery: string;
 }
 
 export interface Peer {
   id: string;
   alias: string;
-  hostname: string;
   platform: string;
   address: string;
-  ageMs: number;
   streams: PeerStream[];
   isListening: boolean;
 }
 
 export interface PeerStream {
-  session: number;
   source: string;
   sourceKind: Kind;
-  startedAtMs: number;
-  listeners: number;
-  codec: Codec;
 }
 
 export interface OwnBroadcast {
@@ -57,30 +48,15 @@ export interface OwnBroadcast {
   source: string;
   startedAtMs: number;
   listeners: Listener[];
-  quality: SendQuality;
+  bitrateKbps: number;
   level: number;
-  packetsSent: number;
   excludesSelf: boolean;
 }
 
 export interface Listener {
   alias: string;
-  id: string;
   address: string;
-  connectedMs: number;
   bufferMs: number;
-  jitterMs: number;
-  lossPct: number;
-  reported: boolean;
-}
-
-export interface SendQuality {
-  mode: string;
-  tier: string;
-  tierLabel: string;
-  bitrateKbps: number;
-  lossPct: number;
-  jitterMs: number;
 }
 
 export interface ListeningStream {
@@ -90,10 +66,7 @@ export interface ListeningStream {
   kind: Kind;
   source: string;
   state: "buffering" | "live" | "waiting" | "standby";
-  bitrateKbps: number;
   bufferMs: number;
-  targetMs: number;
-  jitterMs: number;
   lossPct: number;
   level: number;
   output: string;
@@ -111,8 +84,6 @@ export interface OutputDevice {
   id: string;
   name: string;
   isDefault: boolean;
-  sampleRate: number;
-  channels: number;
 }
 
 export interface VirtualMic {
@@ -126,13 +97,6 @@ export interface VirtualMic {
 export interface Prefs {
   restore: boolean;
   background: boolean;
-}
-
-export interface Codec {
-  name: string;
-  sampleRate: number;
-  channels: number;
-  frameMs: number;
 }
 
 export interface Notice {

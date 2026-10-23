@@ -176,7 +176,6 @@ mod linux {
 
     use crate::audio::device::OutputDevice;
     use crate::audio::pulse::{self, MIC_SINK, MIC_SOURCE, pactl};
-    use crate::protocol::{CHANNELS, SAMPLE_RATE};
 
     pub const PROVIDER: &str = "PulseAudio";
     pub const LINK: Option<&str> = None;
@@ -192,8 +191,6 @@ mod linux {
             id: pulse::device_id(MIC_SINK),
             name: "locoSaonduh-Mic".to_owned(),
             is_default: false,
-            sample_rate: SAMPLE_RATE,
-            channels: CHANNELS as u16,
         }]
     }
 
@@ -245,8 +242,6 @@ mod tests {
             id: name.to_owned(),
             name: name.to_owned(),
             is_default: false,
-            sample_rate: 48_000,
-            channels: 2,
         }
     }
 

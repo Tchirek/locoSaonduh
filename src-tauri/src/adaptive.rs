@@ -371,16 +371,6 @@ pub enum QualityTier {
     Studio,
 }
 
-impl QualityTier {
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Lean => "精简",
-            Self::Balanced => "平衡",
-            Self::Studio => "高保真",
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy)]
 pub struct QualityState {
     pub bitrate_kbps: u32,
