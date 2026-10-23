@@ -1,9 +1,6 @@
 //! The session coordinator.
 //!
-//! One thread owns discovery, the broadcast/listener state and the UDP socket.
-//! Audio callbacks stay on their own realtime threads; this thread only moves
-//! small packets and UI snapshots. That separation is what keeps a busy LAN
-//! from ever blocking the speaker.
+//! 門番が 文を捌きて 歌絶えず
 
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
@@ -139,6 +136,9 @@ impl Service {
         }
 
         let socket = bind_discovery_socket(port)?;
+        let streams: Streams = Arc::new(Mutex::new(HashMap::new()));
+        let (letters, inbox) = mpsc::channel();
+        let intake = Intake::start(Arc::clone(&socket), Arc::clone(&streams), letters)?;
         let local = local_network();
         let notice = local.ip.is_none().then(|| LiveNotice {
             level: "warning".to_owned(),
@@ -155,6 +155,9 @@ impl Service {
             settings,
             port,
             socket,
+            streams,
+            inbox,
+            _intake: intake,
             shared: Arc::clone(&shared),
             commands: commands.clone(),
             peers: HashMap::new(),
@@ -362,6 +365,9 @@ struct Coordinator {
     settings: Settings,
     port: u16,
     socket: Arc<UdpSocket>,
+    streams: Streams,
+    inbox: Receiver<(Vec<u8>, SocketAddr)>,
+    _intake: Intake,
     shared: Arc<Shared>,
     commands: Sender<Command>,
     peers: HashMap<String, Peer>,
@@ -447,6 +453,7 @@ struct ListenerEntry {
 }
 
 type Outlet = Arc<Mutex<Option<rtrb::Producer<[f32; 2]>>>>;
+type Streams = Arc<Mutex<HashMap<String, Arc<Mutex<ReceiverStream>>>>>;
 
 struct VirtualSink {
     _stream: cpal::Stream,
@@ -460,7 +467,7 @@ struct ReceiverRuntime {
     _peak: Arc<AtomicU32>,
     _underruns: Arc<AtomicU64>,
     error: Arc<Mutex<Option<String>>>,
-    streams: Arc<Mutex<HashMap<String, Arc<Mutex<ReceiverStream>>>>>,
+    streams: Streams,
     virtual_out: Outlet,
     virtual_sink: Option<VirtualSink>,
     stop: Arc<AtomicBool>,
@@ -492,9 +499,7 @@ impl Coordinator {
         self.probe_network();
         self.restore();
         loop {
-            if let Err(error) = self.drain_socket() {
-                log::debug!("socket read: {error}");
-            }
+            self.drain_inbox();
             while let Ok(command) = self.command_rx.try_recv() {
                 if !self.handle_command(command) {
                     return;
@@ -1000,6 +1005,7 @@ impl Coordinator {
                 let _ = mixer.join();
             }
         }
+        self.streams.lock().unwrap().clear();
         self.publish();
     }
 
@@ -1024,7 +1030,7 @@ impl Coordinator {
             error,
         } = PlaybackSink::open(self.playback_device().as_deref())
             .map_err(|error| format!("输出设备无法打开：{error}，请在设置中更换"))?;
-        let streams = Arc::new(Mutex::new(HashMap::new()));
+        let streams = Arc::clone(&self.streams);
         let virtual_out: Outlet = Arc::new(Mutex::new(None));
         let stop = Arc::new(AtomicBool::new(false));
         let mixer = {
@@ -1319,59 +1325,17 @@ impl Coordinator {
         self.publish();
     }
 
-    fn drain_socket(&mut self) -> Result<()> {
-        let mut buffer = [0u8; 2_048];
+    fn drain_inbox(&mut self) {
         // A bounded batch means a flooded socket cannot starve timers either.
         for _ in 0..96 {
-            match self.socket.recv_from(&mut buffer) {
-                Ok((len, from)) => {
-                    let payload = &buffer[..len];
-                    if is_audio_datagram(payload) {
-                        self.handle_audio(payload, from);
-                    } else if payload.len() <= MAX_CONTROL_BYTES {
-                        match serde_json::from_slice::<Control>(payload) {
-                            Ok(control) => self.handle_control(control, from),
-                            Err(error) => log::debug!("unreadable control from {from}: {error}"),
-                        }
-                    }
-                }
-                Err(error)
-                    if error.kind() == std::io::ErrorKind::WouldBlock
-                        || error.kind() == std::io::ErrorKind::TimedOut =>
-                {
-                    break;
-                }
-                Err(error) => return Err(error.into()),
+            let Ok((payload, from)) = self.inbox.try_recv() else {
+                break;
+            };
+            match serde_json::from_slice::<Control>(&payload) {
+                Ok(control) => self.handle_control(control, from),
+                Err(error) => log::debug!("unreadable control from {from}: {error}"),
             }
         }
-        Ok(())
-    }
-
-    fn handle_audio(&mut self, payload: &[u8], from: SocketAddr) {
-        let Ok(packet) = parse_audio_packet(payload) else {
-            return;
-        };
-        let Some(runtime) = self.receiver.as_ref() else {
-            return;
-        };
-        let target = {
-            let streams = runtime.streams.lock().unwrap();
-            streams
-                .values()
-                .find(|stream| {
-                    let stream = stream.lock().unwrap();
-                    stream.session == packet.session && stream.address.ip() == from.ip()
-                })
-                .map(Arc::clone)
-        };
-        let Some(stream) = target else {
-            return;
-        };
-        let mut stream = stream.lock().unwrap();
-        stream
-            .buffer
-            .insert_pair(packet.seq, packet.current, packet.previous, Instant::now());
-        stream.last_packet = Instant::now();
     }
 
     fn handle_control(&mut self, control: Control, from: SocketAddr) {
@@ -2032,6 +1996,100 @@ impl Coordinator {
     }
 }
 
+struct Intake {
+    stop: Arc<AtomicBool>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl Intake {
+    fn start(
+        socket: Arc<UdpSocket>,
+        streams: Streams,
+        letters: Sender<(Vec<u8>, SocketAddr)>,
+    ) -> Result<Self> {
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread = {
+            let stop = Arc::clone(&stop);
+            thread::Builder::new()
+                .name("loco-intake".to_owned())
+                .spawn(move || intake_loop(&socket, &streams, &letters, &stop))
+                .context("could not start the packet intake")?
+        };
+        Ok(Self {
+            stop,
+            thread: Some(thread),
+        })
+    }
+}
+
+impl Drop for Intake {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+// 調べ来ば 待たず器へ 注ぎ込む
+fn intake_loop(
+    socket: &UdpSocket,
+    streams: &Streams,
+    letters: &Sender<(Vec<u8>, SocketAddr)>,
+    stop: &AtomicBool,
+) {
+    let mut buffer = [0u8; 2_048];
+    while !stop.load(Ordering::Acquire) {
+        match socket.recv_from(&mut buffer) {
+            Ok((len, from)) => {
+                let payload = &buffer[..len];
+                if is_audio_datagram(payload) {
+                    deliver_audio(streams, payload, from);
+                } else if len <= MAX_CONTROL_BYTES
+                    && letters.send((payload.to_vec(), from)).is_err()
+                {
+                    return;
+                }
+            }
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock
+                        | std::io::ErrorKind::TimedOut
+                        | std::io::ErrorKind::ConnectionReset
+                ) => {}
+            Err(error) => {
+                log::debug!("socket read: {error}");
+                thread::sleep(Duration::from_millis(5));
+            }
+        }
+    }
+}
+
+fn deliver_audio(streams: &Streams, payload: &[u8], from: SocketAddr) {
+    let Ok(packet) = parse_audio_packet(payload) else {
+        return;
+    };
+    let target = streams
+        .lock()
+        .unwrap()
+        .values()
+        .find(|stream| {
+            let stream = stream.lock().unwrap();
+            stream.session == packet.session && stream.address.ip() == from.ip()
+        })
+        .map(Arc::clone);
+    let Some(stream) = target else {
+        return;
+    };
+    let now = Instant::now();
+    let mut stream = stream.lock().unwrap();
+    stream
+        .buffer
+        .insert_pair(packet.seq, packet.current, packet.previous, now);
+    stream.last_packet = now;
+}
+
 struct SenderJob {
     feed: rtrb::Consumer<f32>,
     sample_rate: u32,
@@ -2129,7 +2187,7 @@ fn sender_loop(job: SenderJob) {
 }
 
 fn mixer_loop(
-    streams: Arc<Mutex<HashMap<String, Arc<Mutex<ReceiverStream>>>>>,
+    streams: Streams,
     mut feed: rtrb::Producer<[f32; 2]>,
     virtual_out: Outlet,
     stop: Arc<AtomicBool>,

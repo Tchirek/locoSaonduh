@@ -3,6 +3,7 @@ use socket2::{Domain, Protocol, Socket, Type};
 use std::collections::HashSet;
 use std::net::{Ipv4Addr, SocketAddr, UdpSocket};
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::protocol::{DEFAULT_PORT, MULTICAST_ADDR};
 
@@ -71,12 +72,10 @@ pub fn bind_discovery_socket(port: u16) -> Result<Arc<UdpSocket>> {
     socket
         .bind(&SocketAddr::from((Ipv4Addr::UNSPECIFIED, port)).into())
         .with_context(|| format!("UDP port {port} is already in use"))?;
-    // The session loop polls this socket and must also publish state, answer
-    // commands and send feedback while packets are flowing. A blocking read
-    // would let a continuous stream starve all of that.
+    // 門番は 百ミリごとに 振り返る
     socket
-        .set_nonblocking(true)
-        .context("could not make discovery socket non-blocking")?;
+        .set_read_timeout(Some(Duration::from_millis(100)))
+        .context("could not bound discovery socket reads")?;
     let socket: UdpSocket = socket.into();
 
     // Join on every live interface, not just the route-table default. A VPN
