@@ -8,6 +8,7 @@
   import {
     autostartStatus,
     bootstrap,
+    onShown,
     onState,
     openVendorPage,
     probeNetwork,
@@ -46,6 +47,7 @@
   onMount(() => {
     let cancelled = false;
     let unlisten: (() => void) | undefined;
+    let unlistenShown: (() => void) | undefined;
 
     bootstrap()
       .then((first) => {
@@ -70,11 +72,32 @@
         }
       });
 
+    onShown(resync).then((stop) => {
+      if (cancelled) stop();
+      else unlistenShown = stop;
+    });
+
     return () => {
       cancelled = true;
       unlisten?.();
+      unlistenShown?.();
     };
   });
+
+  // 呼び戻し 灯を見るたびに 帳合はす
+  function resync() {
+    bootstrap()
+      .then((fresh) => {
+        if (!snapshot || fresh.revision >= snapshot.revision) snapshot = fresh;
+      })
+      .catch(() => {});
+    if (tab === "settings") syncSettings();
+  }
+
+  function syncSettings() {
+    void attempt(refreshAudio);
+    void attempt(async () => (autostart = await autostartStatus()));
+  }
 
   $effect(() => {
     const message = snapshot?.notice?.message;
@@ -153,10 +176,7 @@
     if (tab === next) return;
     tab = next;
     scrollEl?.scrollTo({ top: 0 });
-    if (next === "settings") {
-      void attempt(refreshAudio);
-      void attempt(async () => (autostart = await autostartStatus()));
-    }
+    if (next === "settings") syncSettings();
   }
 </script>
 

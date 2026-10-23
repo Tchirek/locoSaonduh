@@ -41,6 +41,12 @@ export async function onState(listener: StateListener): Promise<() => void> {
   return unlisten;
 }
 
+export async function onShown(listener: () => void): Promise<() => void> {
+  if (!IS_TAURI) return () => {};
+  const { listen } = await import("@tauri-apps/api/event");
+  return listen("loco://shown", () => listener());
+}
+
 export async function startStream(kind: Kind): Promise<void> {
   if (IS_TAURI) return invoke("start_stream", { kind });
   return mock.startStream(kind);

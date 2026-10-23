@@ -33,8 +33,11 @@ pub fn run() {
     let start_hidden = std::env::args().any(|arg| arg == HIDDEN_ARG);
 
     let app = tauri::Builder::default()
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-            tray::show_main(app);
+        // 戸を叩く 客には同じ 灯を見せむ
+        .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+            if !args.iter().any(|arg| arg == HIDDEN_ARG) {
+                tray::show_main(app);
+            }
         }))
         .plugin(tauri_plugin_autostart::init(
             MacosLauncher::LaunchAgent,
