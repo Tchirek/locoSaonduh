@@ -19,7 +19,7 @@ use macos_impl::open as open_native;
 #[cfg(target_os = "linux")]
 use linux_impl::open as open_native;
 #[cfg(target_os = "linux")]
-pub use linux_impl::{Takeover, cleanup_stale, pactl};
+pub use linux_impl::{Takeover, cleanup_stale};
 
 #[cfg(target_os = "windows")]
 pub const DETAIL: &str = "WASAPI";
@@ -59,12 +59,24 @@ fn open_default_loopback(source: &AudioSource) -> Result<OpenCapture> {
     })
 }
 
+#[cfg(target_os = "linux")]
 pub fn is_monitor(device_id: &str) -> bool {
-    cfg!(target_os = "linux") && device_id.ends_with(".monitor")
+    device_id.ends_with(".monitor")
 }
 
+#[cfg(not(target_os = "linux"))]
+pub fn is_monitor(_device_id: &str) -> bool {
+    false
+}
+
+#[cfg(target_os = "linux")]
 pub fn is_private_sink(device_id: &str) -> bool {
-    cfg!(target_os = "linux") && device_id.contains("locosaonduh_")
+    super::pulse::is_ours(device_id)
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn is_private_sink(_device_id: &str) -> bool {
+    false
 }
 
 /// 秋の舟 元の岸へと 声返す
@@ -437,128 +449,37 @@ mod macos_impl {
 
 #[cfg(target_os = "linux")]
 mod linux_impl {
-    use std::process::Command;
     use std::sync::Mutex;
 
-    use anyhow::{Context, Result, anyhow};
+    use anyhow::{Result, anyhow};
     use cpal::traits::HostTrait;
 
     use crate::audio::device::{AudioSource, CaptureGuard, OpenCapture, open_device_capture};
+    use crate::audio::pulse::{self, SYSTEM_SINK, pactl};
 
-    const SYSTEM_SINK: &str = "locosaonduh_system";
     static ORIGINAL_SINK: Mutex<Option<String>> = Mutex::new(None);
 
     pub fn original_sink() -> Option<String> {
-        ORIGINAL_SINK
-            .lock()
-            .ok()?
-            .as_ref()
-            .map(|name| cpal::DeviceId::new(cpal::HostId::PulseAudio, name).to_string())
-    }
-
-    pub fn pactl(args: &[&str]) -> Result<String> {
-        let output = Command::new("pactl")
-            .args(args)
-            .output()
-            .context("pactl is not available")?;
-        if !output.status.success() {
-            return Err(anyhow!(
-                "pactl {}: {}",
-                args.first().copied().unwrap_or_default(),
-                String::from_utf8_lossy(&output.stderr).trim()
-            ));
-        }
-        Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
-    }
-
-    fn default_sink() -> Result<String> {
-        if let Ok(name) = pactl(&["get-default-sink"])
-            && !name.is_empty()
-        {
-            return Ok(name);
-        }
-        let info = pactl(&["info"])?;
-        info.lines()
-            .find_map(|line| line.strip_prefix("Default Sink: "))
-            .map(str::to_owned)
-            .ok_or_else(|| anyhow!("no default sink"))
-    }
-
-    struct SinkInput {
-        index: String,
-        sink: String,
-        owner_module: Option<String>,
-        ours: bool,
-    }
-
-    fn sink_inputs() -> Result<Vec<SinkInput>> {
-        let pid = std::process::id().to_string();
-        let marker = format!("cpal-pulseaudio-{pid}");
-        let sinks = pactl(&["list", "short", "sinks"])?
-            .lines()
-            .filter_map(|line| {
-                let mut columns = line.split('\t');
-                Some((columns.next()?.to_owned(), columns.next()?.to_owned()))
-            })
-            .collect::<Vec<_>>();
-        let mut inputs = Vec::new();
-        for block in pactl(&["list", "sink-inputs"])?
-            .split("Sink Input #")
-            .skip(1)
-        {
-            let mut lines = block.lines();
-            let Some(index) = lines.next().map(|line| line.trim().to_owned()) else {
-                continue;
-            };
-            let mut sink = String::new();
-            let mut owner_module = None;
-            let mut ours = block.contains(&marker);
-            for line in lines {
-                let line = line.trim();
-                if let Some(value) = line.strip_prefix("Sink: ") {
-                    sink = sinks
-                        .iter()
-                        .find(|(id, _)| id == value)
-                        .map(|(_, name)| name.clone())
-                        .unwrap_or_else(|| value.to_owned());
-                } else if let Some(value) = line.strip_prefix("Owner Module: ") {
-                    owner_module = Some(value.to_owned());
-                } else if let Some(value) = line.strip_prefix("application.process.id = ") {
-                    ours |= value.trim_matches('"') == pid;
-                }
-            }
-            inputs.push(SinkInput {
-                index,
-                sink,
-                owner_module,
-                ours,
-            });
-        }
-        Ok(inputs)
+        ORIGINAL_SINK.lock().ok()?.as_deref().map(pulse::device_id)
     }
 
     /// 迷ひ子の 帯ほどきやる 夜寒かな
     pub fn cleanup_stale() {
-        let Ok(modules) = pactl(&["list", "short", "modules"]) else {
-            return;
-        };
         let mut restore = None;
         let mut stale = Vec::new();
-        for line in modules.lines() {
-            let mut columns = line.split('\t');
-            let (Some(index), Some(_), Some(args)) =
-                (columns.next(), columns.next(), columns.next())
-            else {
-                continue;
-            };
-            if args.contains(&format!("source={SYSTEM_SINK}.monitor")) {
-                restore = args
+        for module in pulse::modules() {
+            if module
+                .args
+                .contains(&format!("source={SYSTEM_SINK}.monitor"))
+            {
+                restore = module
+                    .args
                     .split_whitespace()
                     .find_map(|arg| arg.strip_prefix("sink="))
                     .map(str::to_owned);
-                stale.push(index.to_owned());
-            } else if args.contains(&format!("sink_name={SYSTEM_SINK}")) {
-                stale.push(index.to_owned());
+                stale.push(module.index);
+            } else if module.args.contains(&format!("sink_name={SYSTEM_SINK}")) {
+                stale.push(module.index);
             }
         }
         if stale.is_empty() {
@@ -566,14 +487,10 @@ mod linux_impl {
         }
         if let Some(original) = restore {
             let _ = pactl(&["set-default-sink", &original]);
-            if let Ok(inputs) = sink_inputs() {
-                for input in inputs.iter().filter(|input| input.sink == SYSTEM_SINK) {
-                    let _ = pactl(&["move-sink-input", &input.index, &original]);
-                }
-            }
+            pulse::move_inputs(SYSTEM_SINK, &original);
         }
         for index in stale {
-            let _ = pactl(&["unload-module", &index]);
+            pulse::unload(&index);
         }
     }
 
@@ -586,7 +503,7 @@ mod linux_impl {
     impl Takeover {
         fn start() -> Result<Self> {
             cleanup_stale();
-            let original = default_sink()?;
+            let original = pulse::default_sink()?;
             let null_module = pactl(&[
                 "load-module",
                 "module-null-sink",
@@ -604,7 +521,7 @@ mod linux_impl {
             ]) {
                 Ok(index) => index,
                 Err(error) => {
-                    let _ = pactl(&["unload-module", &null_module]);
+                    pulse::unload(&null_module);
                     return Err(error);
                 }
             };
@@ -614,7 +531,7 @@ mod linux_impl {
                 original: original.clone(),
             };
             pactl(&["set-default-sink", SYSTEM_SINK])?;
-            for input in sink_inputs()? {
+            for input in pulse::sink_inputs()? {
                 let owned = input.owner_module.as_deref() == Some(&takeover.loopback_module);
                 if input.ours || owned || input.sink != original {
                     continue;
@@ -630,13 +547,9 @@ mod linux_impl {
         fn drop(&mut self) {
             *ORIGINAL_SINK.lock().unwrap() = None;
             let _ = pactl(&["set-default-sink", &self.original]);
-            if let Ok(inputs) = sink_inputs() {
-                for input in inputs.iter().filter(|input| input.sink == SYSTEM_SINK) {
-                    let _ = pactl(&["move-sink-input", &input.index, &self.original]);
-                }
-            }
-            let _ = pactl(&["unload-module", &self.loopback_module]);
-            let _ = pactl(&["unload-module", &self.null_module]);
+            pulse::move_inputs(SYSTEM_SINK, &self.original);
+            pulse::unload(&self.loopback_module);
+            pulse::unload(&self.null_module);
         }
     }
 
@@ -663,7 +576,7 @@ mod linux_impl {
 
     pub fn monitor_of_default() -> Option<cpal::Device> {
         let host = cpal::default_host();
-        let name = default_sink().ok()?;
+        let name = pulse::default_sink().ok()?;
         host.device_by_id(&cpal::DeviceId::new(
             cpal::HostId::PulseAudio,
             format!("{name}.monitor"),

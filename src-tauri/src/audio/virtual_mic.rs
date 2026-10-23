@@ -46,11 +46,13 @@ pub fn candidates(outputs: &[OutputDevice]) -> Vec<OutputDevice> {
     }
 }
 
-pub fn hides_input(id: &str, name: &str) -> bool {
-    if cfg!(target_os = "linux") {
-        return id.contains("locosaonduh_");
-    }
-    let _ = id;
+#[cfg(target_os = "linux")]
+pub fn hides_input(id: &str, _name: &str) -> bool {
+    super::pulse::is_ours(id)
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn hides_input(_id: &str, name: &str) -> bool {
     if cfg!(target_os = "windows") {
         name.starts_with("CABLE Output")
     } else {
@@ -202,34 +204,16 @@ mod linux {
     use anyhow::Result;
 
     use crate::audio::device::OutputDevice;
-    use crate::audio::system::pactl;
+    use crate::audio::pulse::{self, MIC_SINK, MIC_SOURCE, pactl};
     use crate::protocol::{CHANNELS, SAMPLE_RATE};
 
-    const SINK: &str = "locosaonduh_mic";
-    const SOURCE: &str = "locosaonduh_mic_input";
-
-    fn modules() -> Vec<(String, String)> {
-        pactl(&["list", "short", "modules"])
-            .map(|list| {
-                list.lines()
-                    .filter_map(|line| {
-                        let mut columns = line.split('\t');
-                        let index = columns.next()?.to_owned();
-                        let _ = columns.next()?;
-                        Some((index, columns.next().unwrap_or_default().to_owned()))
-                    })
-                    .collect()
-            })
-            .unwrap_or_default()
-    }
-
     pub fn find() -> Option<OutputDevice> {
-        let sinks = pactl(&["list", "short", "sinks"]).ok()?;
+        let sinks = pulse::sinks().ok()?;
         sinks
-            .lines()
-            .any(|line| line.split('\t').nth(1) == Some(SINK))
+            .iter()
+            .any(|(_, name)| name == MIC_SINK)
             .then(|| OutputDevice {
-                id: cpal::DeviceId::new(cpal::HostId::PulseAudio, SINK).to_string(),
+                id: pulse::device_id(MIC_SINK),
                 name: "locoSaonduh-Mic".to_owned(),
                 is_default: false,
                 sample_rate: SAMPLE_RATE,
@@ -244,25 +228,25 @@ mod linux {
         pactl(&[
             "load-module",
             "module-null-sink",
-            &format!("sink_name={SINK}"),
+            &format!("sink_name={MIC_SINK}"),
             "sink_properties=device.description=locoSaonduh-Sink",
         ])?;
         pactl(&[
             "load-module",
             "module-remap-source",
-            &format!("master={SINK}.monitor"),
-            &format!("source_name={SOURCE}"),
+            &format!("master={MIC_SINK}.monitor"),
+            &format!("source_name={MIC_SOURCE}"),
             "source_properties=device.description=locoSaonduh-Mic",
         ])?;
         Ok(())
     }
 
     pub fn release() {
-        for (index, args) in modules() {
-            if args.contains(&format!("source_name={SOURCE}"))
-                || args.contains(&format!("sink_name={SINK}"))
+        for module in pulse::modules() {
+            if module.args.contains(&format!("source_name={MIC_SOURCE}"))
+                || module.args.contains(&format!("sink_name={MIC_SINK}"))
             {
-                let _ = pactl(&["unload-module", &index]);
+                pulse::unload(&module.index);
             }
         }
     }

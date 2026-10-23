@@ -2,6 +2,8 @@ pub mod codec;
 pub mod convert;
 pub mod device;
 pub mod playback;
+#[cfg(target_os = "linux")]
+pub mod pulse;
 pub mod system;
 pub mod virtual_mic;
 
