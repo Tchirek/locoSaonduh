@@ -130,7 +130,6 @@ pub struct StreamBuffer {
     played: u64,
     successive_concealments: u32,
     clean_since: Option<Instant>,
-    last_trim: Option<Instant>,
     paused_since: Option<Instant>,
 }
 
@@ -152,7 +151,6 @@ impl StreamBuffer {
             played: 0,
             successive_concealments: 0,
             clean_since: Some(now),
-            last_trim: None,
             paused_since: None,
         }
     }
@@ -295,8 +293,6 @@ impl StreamBuffer {
         }
 
         let head = self.playhead?;
-        self.trim_excess_latency(now);
-        let head = self.playhead.unwrap_or(head);
 
         let frame = if let Some(payload) = self.packets.remove(&head) {
             self.successive_concealments = 0;
@@ -345,29 +341,6 @@ impl StreamBuffer {
             && self.packets.is_empty()
     }
 
-    fn trim_excess_latency(&mut self, now: Instant) {
-        let Some(head) = self.playhead else {
-            return;
-        };
-        if self.pending_frames() <= self.target_frames() + 6 {
-            return;
-        }
-        let can_trim = self
-            .last_trim
-            .map(|at| now.saturating_duration_since(at) >= Duration::from_millis(250))
-            .unwrap_or(true);
-        if !can_trim {
-            return;
-        }
-        // Skip the oldest queued frame. This is a deliberate latency trade:
-        // one short splice is better than letting delay creep upward forever.
-        if let Some(next) = self.packets.range(head..).map(|(seq, _)| *seq).nth(1) {
-            self.playhead = Some(next);
-            self.discard_before(next);
-            self.last_trim = Some(now);
-        }
-    }
-
     fn pending_frames(&self) -> usize {
         self.playhead
             .map(|head| self.packets.range(head..).count())
@@ -376,6 +349,14 @@ impl StreamBuffer {
 
     pub fn target_ms(&self) -> u32 {
         self.target_ms.round() as u32
+    }
+
+    pub fn latency_target_ms(&self) -> f64 {
+        self.target_ms
+    }
+
+    pub fn is_playing(&self) -> bool {
+        self.started && !self.paused
     }
 
     pub fn buffered_ms(&self) -> u32 {
@@ -695,24 +676,6 @@ mod tests {
             behind_ms <= buffer.target_ms() + FRAME_MS,
             "{behind_ms} ms behind"
         );
-    }
-
-    #[test]
-    fn excess_latency_is_trimmed() {
-        let t0 = Instant::now();
-        let mut buffer = StreamBuffer::new(t0);
-        steady(&mut buffer, t0, 0..50);
-        // 秋時雨 二十の文の 列をなす
-        for seq in 50..70 {
-            buffer.insert_pair(seq, &frame(1), &[], at(t0, 500));
-        }
-        for seq in 70..470 {
-            let now = at(t0, (seq - 20) as u64 * 10);
-            buffer.insert_pair(seq, &frame(1), &[], now);
-            let _ = buffer.tick(now);
-        }
-        let ceiling = buffer.target_ms() + 7 * FRAME_MS;
-        assert!(buffer.buffered_ms() <= ceiling, "{}", buffer.buffered_ms());
     }
 
     #[test]

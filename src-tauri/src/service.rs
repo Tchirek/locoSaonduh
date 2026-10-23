@@ -22,6 +22,7 @@ use crate::audio::{
 use crate::net::{
     LocalNetwork, bind_discovery_socket, local_network, scan_discovery, send_discovery,
 };
+use crate::playout::Playout;
 use crate::protocol::{
     Announce, BroadcastAnnounce, CHANNELS, CodecAnnounce, Control, FRAME_SAMPLES, Feedback,
     MAX_CONTROL_BYTES, Peer, Subscribe, Subscribed, build_audio_packet, is_audio_datagram,
@@ -484,6 +485,7 @@ struct ReceiverStream {
     session: u32,
     address: SocketAddr,
     buffer: StreamBuffer,
+    playout: Playout,
     decoder: Decoder,
     last_packet: Instant,
     level: f32,
@@ -492,18 +494,18 @@ struct ReceiverStream {
 
 impl ReceiverStream {
     fn render(&mut self, now: Instant, pcm: &mut [f32]) -> bool {
-        let Some(frame) = self.buffer.tick(now) else {
-            self.level *= 0.8;
-            return false;
-        };
-        if self.decoder.decode(frame.payload.as_deref(), pcm).is_err() {
-            return false;
-        }
+        let decoder = &mut self.decoder;
+        let sounding = self.playout.render(
+            now,
+            &mut self.buffer,
+            &mut |payload, pcm| decoder.decode(payload, pcm).is_ok(),
+            pcm,
+        );
         let peak = pcm
             .iter()
             .fold(0.0f32, |peak, sample| peak.max(sample.abs()));
         self.level += (peak - self.level) * 0.35;
-        true
+        sounding
     }
 }
 
@@ -1300,6 +1302,7 @@ impl Coordinator {
                     session: subscribed.session,
                     address: from,
                     buffer: StreamBuffer::new(now),
+                    playout: Playout::new(),
                     decoder,
                     last_packet: now,
                     level: 0.0,

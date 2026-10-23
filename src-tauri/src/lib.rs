@@ -2,6 +2,7 @@ pub mod adaptive;
 pub mod audio;
 pub mod commands;
 pub mod net;
+pub mod playout;
 pub mod protocol;
 pub mod service;
 pub mod settings;
