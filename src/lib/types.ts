@@ -117,7 +117,7 @@ export interface OutputDevice {
 
 export interface VirtualMic {
   enabled: boolean;
-  state: "missing" | "installing" | "ready" | "restart" | "failed";
+  state: "missing" | "installing" | "ready" | "restart";
   device: string | null;
   provider: string;
   link: string | null;

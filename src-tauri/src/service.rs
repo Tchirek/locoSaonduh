@@ -131,26 +131,11 @@ impl Service {
         #[cfg(target_os = "linux")]
         crate::audio::system::cleanup_stale();
 
-        let mut settings = Settings::load_or_create(&settings_dir);
-        let outputs = list_output_devices();
-        let virtual_device = virtual_mic::find(&outputs);
-        let mics = microphones(&settings);
-        if settings
-            .mic_id
-            .as_ref()
-            .is_some_and(|id| !mics.iter().any(|source| &source.id == id))
+        let settings = Settings::load_or_create(&settings_dir);
+        if settings.virtual_mic
+            && let Err(error) = virtual_mic::prepare()
         {
-            settings.mic_id = None;
-        }
-        if settings
-            .output_id
-            .as_ref()
-            .is_some_and(|id| !outputs.iter().any(|device| &device.id == id))
-        {
-            settings.output_id = None;
-        }
-        if let Err(error) = settings.save(&settings_dir) {
-            log::warn!("could not save normalised settings: {error}");
+            log::warn!("virtual microphone unavailable: {error:#}");
         }
 
         let socket = bind_discovery_socket(port)?;
@@ -177,14 +162,10 @@ impl Service {
             receiver: None,
             intents: HashMap::new(),
             pending: HashMap::new(),
-            mics,
-            outputs,
-            virtual_state: if virtual_device.is_some() {
-                VirtualState::Ready
-            } else {
-                VirtualState::Missing
-            },
-            virtual_device,
+            mics: Vec::new(),
+            outputs: Vec::new(),
+            virtual_state: VirtualState::Missing,
+            virtual_device: None,
             virtual_deadline: None,
             local,
             revision: 1,
@@ -197,6 +178,7 @@ impl Service {
             next_reconcile: Instant::now(),
             command_rx,
         };
+        coordinator.reload_devices();
         coordinator.publish();
         thread::Builder::new()
             .name("loco-session".to_owned())
@@ -340,7 +322,6 @@ enum VirtualState {
     Settling,
     Ready,
     Restart,
-    Failed,
 }
 
 impl VirtualState {
@@ -350,7 +331,6 @@ impl VirtualState {
             Self::Installing | Self::Settling => "installing",
             Self::Ready => "ready",
             Self::Restart => "restart",
-            Self::Failed => "failed",
         }
     }
 }
@@ -546,12 +526,6 @@ impl Coordinator {
 
     // 目覚めては 昨日の歌を また歌ふ
     fn restore(&mut self) {
-        if self.settings.virtual_mic
-            && let Err(error) = virtual_mic::prepare()
-        {
-            log::warn!("virtual microphone unavailable: {error:#}");
-        }
-        self.detect_virtual();
         if !self.settings.restore {
             return;
         }
@@ -713,20 +687,18 @@ impl Coordinator {
                     Ok(()) => {
                         self.virtual_state = VirtualState::Settling;
                         self.virtual_deadline = Some(Instant::now() + VIRTUAL_SETTLE);
-                        self.detect_virtual();
                     }
                     Err(message) => {
-                        self.virtual_state = VirtualState::Failed;
+                        self.virtual_state = VirtualState::Missing;
                         self.settings.virtual_mic = false;
-                        self.save();
                         self.set_notice("error", message);
                     }
                 }
-                self.sync_virtual_route();
+                self.reload_devices();
                 self.publish();
             }
             Command::RefreshDevices { reply } => {
-                self.refresh_devices();
+                self.reload_devices();
                 let _ = reply.send(Ok(()));
             }
             Command::Probe { reply } => {
@@ -1123,53 +1095,33 @@ impl Coordinator {
 
     fn set_virtual_mic(&mut self, enabled: bool) -> Result<(), String> {
         self.settings.virtual_mic = enabled;
-        self.save();
-        if enabled {
-            self.detect_virtual();
-            if self.virtual_device.is_none()
-                && !matches!(
-                    self.virtual_state,
-                    VirtualState::Installing | VirtualState::Settling
-                )
-            {
-                self.virtual_state = VirtualState::Installing;
-                let commands = self.commands.clone();
-                thread::Builder::new()
-                    .name("loco-virtual-mic".to_owned())
-                    .spawn(move || {
-                        let result = virtual_mic::install().map_err(|error| format!("{error:#}"));
-                        let _ = commands.send(Command::VirtualInstalled { result });
-                    })
-                    .map_err(|error| format!("{error}"))?;
-            }
-        } else {
+        if !enabled {
             virtual_mic::release();
-            self.detect_virtual();
         }
-        self.mics = microphones(&self.settings);
-        self.sync_virtual_route();
-        Ok(())
-    }
-
-    fn detect_virtual(&mut self) {
-        self.outputs = list_output_devices();
-        self.virtual_device = virtual_mic::find(&self.outputs);
-        if self.virtual_device.is_some() {
-            self.virtual_state = VirtualState::Ready;
-            self.virtual_deadline = None;
-        } else if !matches!(
+        self.reload_devices();
+        let installing = matches!(
             self.virtual_state,
-            VirtualState::Installing | VirtualState::Settling | VirtualState::Restart
-        ) {
-            self.virtual_state = VirtualState::Missing;
+            VirtualState::Installing | VirtualState::Settling
+        );
+        if enabled && self.virtual_device.is_none() && !installing {
+            self.virtual_state = VirtualState::Installing;
+            let commands = self.commands.clone();
+            thread::Builder::new()
+                .name("loco-virtual-mic".to_owned())
+                .spawn(move || {
+                    let result = virtual_mic::install().map_err(|error| format!("{error:#}"));
+                    let _ = commands.send(Command::VirtualInstalled { result });
+                })
+                .map_err(|error| format!("{error}"))?;
         }
+        Ok(())
     }
 
     fn settle_virtual(&mut self, now: Instant) {
         if self.virtual_state != VirtualState::Settling {
             return;
         }
-        self.detect_virtual();
+        self.reload_devices();
         if self.virtual_state == VirtualState::Settling
             && self
                 .virtual_deadline
@@ -1177,9 +1129,6 @@ impl Coordinator {
         {
             self.virtual_state = VirtualState::Restart;
         }
-        self.mics = microphones(&self.settings);
-        self.sync_virtual_route();
-        self.publish_soon();
     }
 
     fn reconcile_receiver(&mut self, now: Instant) {
@@ -1807,8 +1756,7 @@ impl Coordinator {
                 *runtime.virtual_out.lock().unwrap() = None;
                 runtime.virtual_sink = None;
             }
-            self.detect_virtual();
-            self.sync_virtual_route();
+            self.reload_devices();
         }
         let playback_error = self
             .receiver
@@ -1826,9 +1774,20 @@ impl Coordinator {
         }
     }
 
-    fn refresh_devices(&mut self) {
+    // 棚卸し 一度に済めば 秋晴るる
+    fn reload_devices(&mut self) {
         self.mics = microphones(&self.settings);
-        self.detect_virtual();
+        self.outputs = list_output_devices();
+        self.virtual_device = virtual_mic::find(&self.outputs);
+        if self.virtual_device.is_some() {
+            self.virtual_state = VirtualState::Ready;
+            self.virtual_deadline = None;
+        } else if !matches!(
+            self.virtual_state,
+            VirtualState::Installing | VirtualState::Settling | VirtualState::Restart
+        ) {
+            self.virtual_state = VirtualState::Missing;
+        }
         if self
             .settings
             .mic_id

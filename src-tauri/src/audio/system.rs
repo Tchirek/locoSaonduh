@@ -481,7 +481,6 @@ mod linux_impl {
 
     impl Takeover {
         fn start() -> Result<Self> {
-            cleanup_stale();
             let original = pulse::default_sink()?;
             let null_module = pactl(&[
                 "load-module",
