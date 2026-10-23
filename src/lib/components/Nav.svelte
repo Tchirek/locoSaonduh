@@ -30,7 +30,7 @@
       aria-current={tab === item.id ? "page" : undefined}
       onclick={() => onTab(item.id)}
     >
-      <item.icon size={20} strokeWidth={1.7} />
+      <span class="pill"><item.icon size={20} strokeWidth={1.7} /></span>
       <span class="label">
         {item.label}
         {#if item.id === "receive" && listening > 0}
@@ -57,25 +57,36 @@
 
   .item {
     display: flex;
-    width: 60px;
+    width: 64px;
     flex-direction: column;
     align-items: center;
     gap: 4px;
-    padding: 8px 0 6px;
+    padding: 4px 0;
     border-radius: var(--radius);
     color: var(--muted);
-    transition:
-      color 140ms ease,
-      background-color 140ms ease;
+    transition: color 140ms ease;
   }
 
-  .item:hover {
-    color: var(--ink);
+  .pill {
+    display: grid;
+    width: 52px;
+    height: 30px;
+    place-items: center;
+    border-radius: 15px;
+    transition: background-color 140ms ease;
   }
 
+  .item:hover,
   .item.active {
     color: var(--ink);
+  }
+
+  .item:hover .pill {
     background: var(--hover);
+  }
+
+  .item.active .pill {
+    background: var(--line-strong);
   }
 
   .label {
