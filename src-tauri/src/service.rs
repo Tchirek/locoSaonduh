@@ -18,8 +18,9 @@ use anyhow::{Context, Result, anyhow};
 
 use crate::adaptive::{FRAME_DURATION, QualityController, QualityTier, StreamBuffer};
 use crate::audio::{
-    AudioSource, CaptureGuard, Decoder, Encoder, OpenCapture, OutputDevice, PlaybackSink,
-    SourceKind, list_microphones, list_output_devices, open_capture, system_source, virtual_mic,
+    AudioSource, CaptureGuard, CaptureTaps, Decoder, Encoder, OpenCapture, OutputDevice,
+    PlaybackSink, SourceKind, list_microphones, list_output_devices, open_capture, system_source,
+    virtual_mic,
 };
 use crate::net::{
     LocalNetwork, bind_discovery_socket, local_network, scan_discovery, send_discovery,
@@ -392,9 +393,7 @@ struct BroadcastRuntime {
     started_at_ms: u64,
     source: AudioSource,
     capture: Option<CaptureGuard>,
-    capture_error: Arc<Mutex<Option<String>>>,
-    capture_peak: Arc<AtomicU32>,
-    overflowed_samples: Arc<AtomicU64>,
+    taps: CaptureTaps,
     listeners: Arc<Mutex<Vec<ListenerEntry>>>,
     control: Arc<SenderControl>,
     sender: Option<JoinHandle<()>>,
@@ -762,12 +761,10 @@ impl Coordinator {
             source: opened_source,
             sample_rate,
             channels,
-            peak,
-            overflowed_samples,
-            error,
+            taps,
             excludes_self,
         } = open_capture(&source)?;
-        if let Some(message) = error.lock().unwrap().take() {
+        if let Some(message) = taps.error.lock().unwrap().take() {
             return Err(anyhow!(message));
         }
 
@@ -800,9 +797,7 @@ impl Coordinator {
             started_at_ms: epoch_ms(),
             source: opened_source,
             capture: Some(guard),
-            capture_error: error,
-            capture_peak: peak,
-            overflowed_samples,
+            taps,
             listeners,
             control,
             sender: Some(sender),
@@ -1733,7 +1728,8 @@ impl Coordinator {
             .iter()
             .filter_map(|runtime| {
                 runtime
-                    .capture_error
+                    .taps
+                    .error
                     .lock()
                     .ok()
                     .and_then(|mut slot| slot.take())
@@ -1874,8 +1870,7 @@ impl Coordinator {
                     })
                     .unwrap_or_default();
                 let quality = runtime.quality.state();
-                let level = f32::from_bits(runtime.capture_peak.swap(0, Ordering::Relaxed));
-                let _ = runtime.overflowed_samples.load(Ordering::Relaxed);
+                let level = f32::from_bits(runtime.taps.peak.swap(0, Ordering::Relaxed));
                 BroadcastOwnView {
                     session: runtime.session,
                     kind: runtime.kind.label().to_owned(),

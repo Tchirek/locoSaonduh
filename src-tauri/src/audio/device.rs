@@ -1,6 +1,6 @@
 //! 耳ひとつ 己が声のみ 聞かぬ秋
 
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result, anyhow};
@@ -130,15 +130,14 @@ pub fn list_output_devices() -> Vec<OutputDevice> {
     devices
 }
 
-/// 秋の水 止めて後にぞ 樋外す
 pub enum CaptureGuard {
     Cpal(cpal::Stream),
     #[cfg(target_os = "windows")]
     Excluding(system::ExcludingCapture),
     #[cfg(target_os = "macos")]
-    Tap(cpal::Stream, system::ExcludingTap),
+    Tap(system::ExcludingTap),
     #[cfg(target_os = "linux")]
-    Takeover(cpal::Stream, system::Takeover),
+    Takeover(system::Takeover),
 }
 
 pub struct OpenCapture {
@@ -147,16 +146,47 @@ pub struct OpenCapture {
     pub source: AudioSource,
     pub sample_rate: u32,
     pub channels: usize,
-    pub peak: Arc<AtomicU32>,
-    pub overflowed_samples: Arc<AtomicU64>,
-    pub error: Arc<Mutex<Option<String>>>,
+    pub taps: CaptureTaps,
     pub excludes_self: bool,
+}
+
+impl OpenCapture {
+    pub fn from_device(
+        source: &AudioSource,
+        capture: DeviceCapture,
+        guard: impl FnOnce(cpal::Stream) -> CaptureGuard,
+        excludes_self: bool,
+    ) -> Self {
+        let DeviceCapture {
+            stream,
+            feed,
+            sample_rate,
+            channels,
+            taps,
+        } = capture;
+        Self {
+            guard: guard(stream),
+            feed,
+            source: source.clone(),
+            sample_rate,
+            channels,
+            taps,
+            excludes_self,
+        }
+    }
+}
+
+pub struct DeviceCapture {
+    pub stream: cpal::Stream,
+    pub feed: rtrb::Consumer<f32>,
+    pub sample_rate: u32,
+    pub channels: usize,
+    pub taps: CaptureTaps,
 }
 
 #[derive(Clone, Default)]
 pub struct CaptureTaps {
     pub peak: Arc<AtomicU32>,
-    pub overflowed: Arc<AtomicU64>,
     pub error: Arc<Mutex<Option<String>>>,
 }
 
@@ -170,18 +200,12 @@ impl CaptureTaps {
 
     pub fn push(&self, producer: &mut rtrb::Producer<f32>, samples: impl Iterator<Item = f32>) {
         let mut local_peak = 0.0_f32;
-        let mut dropped = 0_u64;
         for value in samples {
             local_peak = local_peak.max(value.abs());
-            if producer.push(value).is_err() {
-                dropped += 1;
-            }
+            let _ = producer.push(value);
         }
         if local_peak > 0.0 {
             self.peak.fetch_max(local_peak.to_bits(), Ordering::Relaxed);
-        }
-        if dropped > 0 {
-            self.overflowed.fetch_add(dropped, Ordering::Relaxed);
         }
     }
 }
@@ -205,24 +229,16 @@ pub fn open_capture(source: &AudioSource) -> Result<OpenCapture> {
     let device = cpal::default_host()
         .device_by_id(&device_id)
         .ok_or_else(|| anyhow!("audio device is no longer connected"))?;
-    let (stream, feed, sample_rate, channels, taps) = open_device_capture(&device, false)?;
-    Ok(OpenCapture {
-        guard: CaptureGuard::Cpal(stream),
-        feed,
-        source: source.clone(),
-        sample_rate,
-        channels,
-        peak: taps.peak,
-        overflowed_samples: taps.overflowed,
-        error: taps.error,
-        excludes_self: false,
-    })
+    let capture = open_device_capture(&device, false)?;
+    Ok(OpenCapture::from_device(
+        source,
+        capture,
+        CaptureGuard::Cpal,
+        false,
+    ))
 }
 
-pub fn open_device_capture(
-    device: &cpal::Device,
-    loopback: bool,
-) -> Result<(cpal::Stream, rtrb::Consumer<f32>, u32, usize, CaptureTaps)> {
+pub fn open_device_capture(device: &cpal::Device, loopback: bool) -> Result<DeviceCapture> {
     let config = if loopback {
         device
             .default_output_config()
@@ -258,10 +274,13 @@ pub fn open_device_capture(
     stream
         .play()
         .context("could not start the capture stream")?;
-    if let Some(message) = taps.error.lock().unwrap().take() {
-        return Err(anyhow!(message));
-    }
-    Ok((stream, feed, sample_rate, channels, taps))
+    Ok(DeviceCapture {
+        stream,
+        feed,
+        sample_rate,
+        channels,
+        taps,
+    })
 }
 
 fn build_input<T>(

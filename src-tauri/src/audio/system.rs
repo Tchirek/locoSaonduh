@@ -89,9 +89,7 @@ mod windows_impl {
             source: source.clone(),
             sample_rate: SAMPLE_RATE,
             channels: CHANNELS,
-            peak: taps.peak,
-            overflowed_samples: taps.overflowed,
-            error: taps.error,
+            taps,
             excludes_self: true,
         })
     }
@@ -100,18 +98,13 @@ mod windows_impl {
         let device = cpal::default_host()
             .default_output_device()
             .ok_or_else(|| anyhow!("no audio output to capture"))?;
-        let (stream, feed, sample_rate, channels, taps) = open_device_capture(&device, true)?;
-        Ok(OpenCapture {
-            guard: CaptureGuard::Cpal(stream),
-            feed,
-            source: source.clone(),
-            sample_rate,
-            channels,
-            peak: taps.peak,
-            overflowed_samples: taps.overflowed,
-            error: taps.error,
-            excludes_self: false,
-        })
+        let capture = open_device_capture(&device, true)?;
+        Ok(OpenCapture::from_device(
+            source,
+            capture,
+            CaptureGuard::Cpal,
+            false,
+        ))
     }
 
     fn start(mut producer: rtrb::Producer<f32>, taps: CaptureTaps) -> Result<ExcludingCapture> {
@@ -246,13 +239,16 @@ mod macos_impl {
     use crate::audio::device::{AudioSource, CaptureGuard, OpenCapture, open_device_capture};
 
     pub struct ExcludingTap {
+        stream: Option<cpal::Stream>,
         tap_id: AudioObjectID,
         aggregate_id: AudioObjectID,
         uid: String,
     }
 
+    /// 秋の水 止めて後にぞ 樋外す
     impl Drop for ExcludingTap {
         fn drop(&mut self) {
+            drop(self.stream.take());
             unsafe {
                 let _ = AudioHardwareDestroyAggregateDevice(self.aggregate_id);
                 let _ = AudioHardwareDestroyProcessTap(self.tap_id);
@@ -261,7 +257,7 @@ mod macos_impl {
     }
 
     pub fn open(source: &AudioSource) -> Result<OpenCapture> {
-        let tap = ExcludingTap::create()?;
+        let mut tap = ExcludingTap::create()?;
         let host = cpal::default_host();
         let id = cpal::DeviceId::new(cpal::HostId::CoreAudio, &tap.uid);
         let mut device = None;
@@ -273,18 +269,16 @@ mod macos_impl {
             std::thread::sleep(Duration::from_millis(25));
         }
         let device = device.ok_or_else(|| anyhow!("the system tap did not appear"))?;
-        let (stream, feed, sample_rate, channels, taps) = open_device_capture(&device, false)?;
-        Ok(OpenCapture {
-            guard: CaptureGuard::Tap(stream, tap),
-            feed,
-            source: source.clone(),
-            sample_rate,
-            channels,
-            peak: taps.peak,
-            overflowed_samples: taps.overflowed,
-            error: taps.error,
-            excludes_self: true,
-        })
+        let capture = open_device_capture(&device, false)?;
+        Ok(OpenCapture::from_device(
+            source,
+            capture,
+            move |stream| {
+                tap.stream = Some(stream);
+                CaptureGuard::Tap(tap)
+            },
+            true,
+        ))
     }
 
     impl ExcludingTap {
@@ -323,6 +317,7 @@ mod macos_impl {
                 return Err(anyhow!("aggregate device refused ({status})"));
             }
             Ok(Self {
+                stream: None,
                 tap_id,
                 aggregate_id,
                 uid,
@@ -474,6 +469,7 @@ mod linux_impl {
     }
 
     pub struct Takeover {
+        stream: Option<cpal::Stream>,
         null_module: String,
         loopback_module: String,
         original: String,
@@ -504,6 +500,7 @@ mod linux_impl {
                 }
             };
             let takeover = Self {
+                stream: None,
                 null_module,
                 loopback_module,
                 original: original.clone(),
@@ -523,6 +520,7 @@ mod linux_impl {
 
     impl Drop for Takeover {
         fn drop(&mut self) {
+            drop(self.stream.take());
             *ORIGINAL_SINK.lock().unwrap() = None;
             let _ = pactl(&["set-default-sink", &self.original]);
             pulse::move_inputs(SYSTEM_SINK, &self.original);
@@ -532,23 +530,21 @@ mod linux_impl {
     }
 
     pub fn open(source: &AudioSource) -> Result<OpenCapture> {
-        let takeover = Takeover::start()?;
+        let mut takeover = Takeover::start()?;
         let host = cpal::default_host();
         let id = cpal::DeviceId::new(cpal::HostId::PulseAudio, format!("{SYSTEM_SINK}.monitor"));
         let device = host
             .device_by_id(&id)
             .ok_or_else(|| anyhow!("the takeover monitor is missing"))?;
-        let (stream, feed, sample_rate, channels, taps) = open_device_capture(&device, false)?;
-        Ok(OpenCapture {
-            guard: CaptureGuard::Takeover(stream, takeover),
-            feed,
-            source: source.clone(),
-            sample_rate,
-            channels,
-            peak: taps.peak,
-            overflowed_samples: taps.overflowed,
-            error: taps.error,
-            excludes_self: true,
-        })
+        let capture = open_device_capture(&device, false)?;
+        Ok(OpenCapture::from_device(
+            source,
+            capture,
+            move |stream| {
+                takeover.stream = Some(stream);
+                CaptureGuard::Takeover(takeover)
+            },
+            true,
+        ))
     }
 }
