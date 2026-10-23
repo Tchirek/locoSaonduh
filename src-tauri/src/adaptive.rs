@@ -11,7 +11,6 @@ use std::time::{Duration, Instant};
 
 use crate::protocol::{FRAME_MS, Feedback};
 
-pub const FRAME_DURATION: Duration = Duration::from_millis(FRAME_MS as u64);
 pub const MIN_TARGET_MS: f64 = 30.0;
 pub const MAX_TARGET_MS: f64 = 200.0;
 const START_TARGET_MS: f64 = 40.0;

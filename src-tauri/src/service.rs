@@ -5,7 +5,7 @@
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -13,11 +13,11 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow};
 
-use crate::adaptive::{FRAME_DURATION, QualityController, StreamBuffer};
+use crate::adaptive::{QualityController, StreamBuffer};
 use crate::audio::{
     AudioSource, CaptureGuard, CaptureTaps, Decoder, Encoder, OpenCapture, OutputDevice,
-    PlaybackSink, SourceKind, list_microphones, list_output_devices, open_capture, system_source,
-    virtual_mic,
+    OutputTaps, PlaybackSink, SourceKind, list_microphones, list_output_devices, open_capture,
+    system_source, virtual_mic,
 };
 use crate::net::{
     LocalNetwork, bind_discovery_socket, local_network, scan_discovery, send_discovery,
@@ -43,6 +43,9 @@ const AUTO_RETRY: Duration = Duration::from_secs(3);
 const PENDING_TTL: Duration = Duration::from_millis(2_500);
 const LISTENER_TTL: Duration = Duration::from_secs(30);
 const VIRTUAL_SETTLE: Duration = Duration::from_secs(12);
+const MIN_MARGIN: usize = FRAME_SAMPLES / 2;
+const MAX_MARGIN: usize = FRAME_SAMPLES * 5;
+const MARGIN_CALM: Duration = Duration::from_secs(30);
 const MAX_LISTENERS: usize = 24;
 const MAX_INTENTS: usize = 8;
 
@@ -452,7 +455,7 @@ struct ListenerEntry {
     report: Option<Feedback>,
 }
 
-type Outlet = Arc<Mutex<Option<rtrb::Producer<[f32; 2]>>>>;
+type Outlet = Arc<Mutex<Option<Lane>>>;
 type Streams = Arc<Mutex<HashMap<String, Arc<Mutex<ReceiverStream>>>>>;
 
 struct VirtualSink {
@@ -464,8 +467,6 @@ struct VirtualSink {
 struct ReceiverRuntime {
     _playback_stream: cpal::Stream,
     playback: crate::audio::PlaybackInfo,
-    _peak: Arc<AtomicU32>,
-    _underruns: Arc<AtomicU64>,
     error: Arc<Mutex<Option<String>>>,
     streams: Streams,
     virtual_out: Outlet,
@@ -487,6 +488,23 @@ struct ReceiverStream {
     last_packet: Instant,
     level: f32,
     to_virtual: bool,
+}
+
+impl ReceiverStream {
+    fn render(&mut self, now: Instant, pcm: &mut [f32]) -> bool {
+        let Some(frame) = self.buffer.tick(now) else {
+            self.level *= 0.8;
+            return false;
+        };
+        if self.decoder.decode(frame.payload.as_deref(), pcm).is_err() {
+            return false;
+        }
+        let peak = pcm
+            .iter()
+            .fold(0.0f32, |peak, sample| peak.max(sample.abs()));
+        self.level += (peak - self.level) * 0.35;
+        true
+    }
 }
 
 impl Coordinator {
@@ -1025,9 +1043,7 @@ impl Coordinator {
             stream,
             feed,
             info,
-            peak,
-            underrun_samples,
-            error,
+            taps,
         } = PlaybackSink::open(self.playback_device().as_deref())
             .map_err(|error| format!("输出设备无法打开：{error}，请在设置中更换"))?;
         let streams = Arc::clone(&self.streams);
@@ -1037,17 +1053,16 @@ impl Coordinator {
             let streams = Arc::clone(&streams);
             let virtual_out = Arc::clone(&virtual_out);
             let stop = Arc::clone(&stop);
+            let main = Lane::new(feed, taps.clone());
             thread::Builder::new()
                 .name("loco-mixer".to_owned())
-                .spawn(move || mixer_loop(streams, feed, virtual_out, stop))
+                .spawn(move || mixer_loop(streams, main, virtual_out, stop))
                 .map_err(|error| format!("混音线程无法启动：{error}"))?
         };
         self.receiver = Some(ReceiverRuntime {
             _playback_stream: stream,
             playback: info,
-            _peak: peak,
-            _underruns: underrun_samples,
-            error,
+            error: taps.error,
             streams,
             virtual_out,
             virtual_sink: None,
@@ -1082,11 +1097,12 @@ impl Coordinator {
             for device in &candidates {
                 match PlaybackSink::open(Some(&device.id)) {
                     Ok(sink) => {
-                        *runtime.virtual_out.lock().unwrap() = Some(sink.feed);
+                        *runtime.virtual_out.lock().unwrap() =
+                            Some(Lane::new(sink.feed, sink.taps.clone()));
                         runtime.virtual_sink = Some(VirtualSink {
                             _stream: sink.stream,
                             name: sink.info.device_name,
-                            error: sink.error,
+                            error: sink.taps.error,
                         });
                         break;
                     }
@@ -2186,83 +2202,117 @@ fn sender_loop(job: SenderJob) {
     }
 }
 
-fn mixer_loop(
-    streams: Streams,
-    mut feed: rtrb::Producer<[f32; 2]>,
-    virtual_out: Outlet,
-    stop: Arc<AtomicBool>,
-) {
-    let mut mixes = [
-        vec![0.0f32; FRAME_SAMPLES * CHANNELS],
-        vec![0.0f32; FRAME_SAMPLES * CHANNELS],
-    ];
-    let mut decoded = vec![0.0f32; FRAME_SAMPLES * CHANNELS];
-    let mut next_tick = Instant::now();
+// 瓶の底 見えそめたらば 汲み足さむ
+struct Lane {
+    feed: rtrb::Producer<[f32; 2]>,
+    taps: OutputTaps,
+    primed: bool,
+    seen_underruns: u64,
+    margin: usize,
+    calm_since: Instant,
+    clip: opus_pure::SoftClip,
+}
+
+impl Lane {
+    fn new(feed: rtrb::Producer<[f32; 2]>, taps: OutputTaps) -> Self {
+        Self {
+            feed,
+            taps,
+            primed: false,
+            seen_underruns: 0,
+            margin: MIN_MARGIN,
+            calm_since: Instant::now(),
+            clip: opus_pure::SoftClip::new(CHANNELS),
+        }
+    }
+
+    fn wants_frame(&mut self, now: Instant) -> bool {
+        let underruns = self.taps.underruns.load(Ordering::Relaxed);
+        if !self.primed {
+            self.seen_underruns = underruns;
+        } else if underruns != self.seen_underruns {
+            // 涸れし夜は 水際一寸 高く取る
+            self.seen_underruns = underruns;
+            self.margin = (self.margin + MIN_MARGIN).min(MAX_MARGIN);
+            self.calm_since = now;
+        } else if self.margin > MIN_MARGIN
+            && now.saturating_duration_since(self.calm_since) > MARGIN_CALM
+        {
+            self.margin -= MIN_MARGIN / 2;
+            self.calm_since = now;
+        }
+        let quantum = (self.taps.quantum.load(Ordering::Relaxed) as usize).max(FRAME_SAMPLES);
+        let queued = self.feed.buffer().capacity() - self.feed.slots();
+        queued < quantum + FRAME_SAMPLES + self.margin
+    }
+
+    fn push(&mut self, mix: &mut [f32]) {
+        // 溢るるを 撓めて丸く 縁に添ふ
+        self.clip.apply(mix);
+        for frame in mix.as_chunks::<CHANNELS>().0 {
+            if self.feed.push(*frame).is_err() {
+                break;
+            }
+        }
+        self.primed = true;
+    }
+}
+
+fn mixer_loop(streams: Streams, mut main: Lane, virtual_out: Outlet, stop: Arc<AtomicBool>) {
+    let mut mix = vec![0.0f32; FRAME_SAMPLES * CHANNELS];
+    let mut pcm = vec![0.0f32; FRAME_SAMPLES * CHANNELS];
+    let mut active = Vec::new();
     while !stop.load(Ordering::Acquire) {
         let now = Instant::now();
-        if now < next_tick {
-            thread::sleep(next_tick - now);
+        let mut outlet = virtual_out.lock().unwrap();
+        let main_due = main.wants_frame(now);
+        let virtual_due = outlet.as_mut().is_some_and(|lane| lane.wants_frame(now));
+        if !main_due && !virtual_due {
+            drop(outlet);
+            thread::sleep(Duration::from_millis(1));
             continue;
         }
-        if now.saturating_duration_since(next_tick) > Duration::from_millis(80) {
-            next_tick = now;
-        } else {
-            next_tick += FRAME_DURATION;
+        active.clear();
+        active.extend(streams.lock().unwrap().values().cloned());
+        if main_due {
+            // 行き場なき 声も時をば 刻ませむ
+            mix_lane(&active, false, outlet.is_none(), now, &mut pcm, &mut mix);
+            main.push(&mut mix);
         }
-
-        for mix in &mut mixes {
-            mix.fill(0.0);
-        }
-        let active = streams
-            .lock()
-            .map(|streams| streams.values().cloned().collect::<Vec<_>>())
-            .unwrap_or_default();
-        let mut contributors = [0usize; 2];
-        for stream in active {
-            let mut stream = stream.lock().unwrap();
-            let Some(frame) = stream.buffer.tick(now) else {
-                stream.level *= 0.8;
-                continue;
-            };
-            if stream
-                .decoder
-                .decode(frame.payload.as_deref(), &mut decoded)
-                .is_ok()
-            {
-                let peak = decoded
-                    .iter()
-                    .fold(0.0f32, |peak, sample| peak.max(sample.abs()));
-                stream.level += (peak - stream.level) * 0.35;
-                let lane = usize::from(stream.to_virtual);
-                for (out, sample) in mixes[lane].iter_mut().zip(decoded.iter()) {
-                    *out += *sample;
-                }
-                contributors[lane] += 1;
-            }
-        }
-        for (mix, count) in mixes.iter_mut().zip(contributors) {
-            if count > 1 {
-                let gain = 1.0 / (count as f32).sqrt();
-                for sample in mix.iter_mut() {
-                    *sample *= gain;
-                }
-            }
-        }
-        push_mix(&mut feed, &mixes[0]);
-        if let Ok(mut outlet) = virtual_out.lock()
-            && let Some(producer) = outlet.as_mut()
-        {
-            push_mix(producer, &mixes[1]);
+        if virtual_due && let Some(lane) = outlet.as_mut() {
+            mix_lane(&active, true, false, now, &mut pcm, &mut mix);
+            lane.push(&mut mix);
         }
     }
 }
 
-fn push_mix(feed: &mut rtrb::Producer<[f32; 2]>, mix: &[f32]) {
-    for frame in mix.as_chunks::<CHANNELS>().0 {
-        let left = frame[0].clamp(-0.98, 0.98);
-        let right = frame[1].clamp(-0.98, 0.98);
-        if feed.push([left, right]).is_err() {
-            break;
+fn mix_lane(
+    active: &[Arc<Mutex<ReceiverStream>>],
+    virtual_lane: bool,
+    strays: bool,
+    now: Instant,
+    pcm: &mut [f32],
+    mix: &mut [f32],
+) {
+    mix.fill(0.0);
+    let mut voices = 0usize;
+    for stream in active {
+        let mut stream = stream.lock().unwrap();
+        let ours = stream.to_virtual == virtual_lane;
+        if !ours && !strays {
+            continue;
+        }
+        if stream.render(now, pcm) && ours {
+            for (out, sample) in mix.iter_mut().zip(pcm.iter()) {
+                *out += *sample;
+            }
+            voices += 1;
+        }
+    }
+    if voices > 1 {
+        let gain = 1.0 / (voices as f32).sqrt();
+        for sample in mix.iter_mut() {
+            *sample *= gain;
         }
     }
 }
@@ -2286,6 +2336,57 @@ fn epoch_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn lane() -> (Lane, rtrb::Consumer<[f32; 2]>, OutputTaps) {
+        let (feed, consumer) = rtrb::RingBuffer::new(16_384);
+        let taps = OutputTaps::default();
+        taps.quantum.store(FRAME_SAMPLES as u32, Ordering::Relaxed);
+        (Lane::new(feed, taps.clone()), consumer, taps)
+    }
+
+    #[test]
+    fn a_lane_tops_up_to_its_headroom() {
+        let (mut lane, mut device, _) = lane();
+        let now = Instant::now();
+        let mut mix = vec![0.0; FRAME_SAMPLES * CHANNELS];
+        let mut frames = 0;
+        while lane.wants_frame(now) {
+            lane.push(&mut mix);
+            frames += 1;
+        }
+        assert_eq!(frames, 3);
+        for _ in 0..FRAME_SAMPLES {
+            device.pop().unwrap();
+        }
+        assert!(lane.wants_frame(now));
+    }
+
+    #[test]
+    fn an_underrun_widens_the_margin_until_things_calm_down() {
+        let (mut lane, _device, taps) = lane();
+        let now = Instant::now();
+        lane.push(&mut vec![0.0; FRAME_SAMPLES * CHANNELS]);
+        taps.underruns.fetch_add(64, Ordering::Relaxed);
+        lane.wants_frame(now);
+        assert_eq!(lane.margin, MIN_MARGIN * 2);
+        lane.wants_frame(now + MARGIN_CALM + Duration::from_secs(1));
+        assert!(lane.margin < MIN_MARGIN * 2);
+    }
+
+    #[test]
+    fn the_mix_bus_bends_overs_instead_of_clipping() {
+        let (mut lane, mut device, _) = lane();
+        let mut mix = (0..FRAME_SAMPLES * CHANNELS)
+            .map(|index| ((index / 2) as f32 * 0.05).sin() * 1.6)
+            .collect::<Vec<_>>();
+        lane.push(&mut mix);
+        let out = std::iter::from_fn(|| device.pop().ok())
+            .flatten()
+            .collect::<Vec<_>>();
+        assert_eq!(out.len(), FRAME_SAMPLES * CHANNELS);
+        let peak = out.iter().fold(0.0f32, |peak, s| peak.max(s.abs()));
+        assert!(peak <= 1.0 && peak > 0.99, "{peak}");
+    }
 
     #[test]
     fn session_ids_are_never_zero() {

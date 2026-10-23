@@ -14,4 +14,4 @@ pub use device::{
     AudioSource, CaptureGuard, CaptureTaps, OpenCapture, OutputDevice, SYSTEM_SOURCE_ID,
     SourceKind, list_microphones, list_output_devices, open_capture, system_source,
 };
-pub use playback::{PlaybackInfo, PlaybackSink};
+pub use playback::{OutputTaps, PlaybackInfo, PlaybackSink};
