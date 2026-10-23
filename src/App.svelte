@@ -185,7 +185,6 @@
     <Mark size={40} />
     <h1>音频服务未启动</h1>
     <p class="meta">{fatal}</p>
-    <p class="meta">端口 53410 可能被占用，关闭占用程序后重开</p>
   </main>
 {:else if !snapshot}
   <main class="center" role="status" aria-label="正在启动">

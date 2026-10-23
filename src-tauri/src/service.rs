@@ -19,9 +19,7 @@ use crate::audio::{
     OutputTaps, PlaybackSink, SourceKind, list_microphones, list_output_devices, open_capture,
     system_source, virtual_mic,
 };
-use crate::net::{
-    LocalNetwork, bind_discovery_socket, local_network, scan_discovery, send_discovery,
-};
+use crate::net::{LocalNetwork, bind_with_fallback, local_network, scan_discovery, send_discovery};
 use crate::playout::Playout;
 use crate::protocol::{
     Announce, BroadcastAnnounce, CHANNELS, CodecAnnounce, Control, FRAME_SAMPLES, Feedback,
@@ -139,14 +137,21 @@ impl Service {
             log::warn!("virtual microphone unavailable: {error:#}");
         }
 
-        let socket = bind_discovery_socket(port)?;
+        let (socket, bound) = bind_with_fallback(port, Duration::from_millis(1_500))?;
         let streams: Streams = Arc::new(Mutex::new(HashMap::new()));
         let (letters, inbox) = mpsc::channel();
         let intake = Intake::start(Arc::clone(&socket), Arc::clone(&streams), letters)?;
         let local = local_network();
-        let notice = local.ip.is_none().then(|| LiveNotice {
+        let warning = if bound != port {
+            Some(format!("端口 {port} 已被占用，改用 {bound}"))
+        } else if local.ip.is_none() {
+            Some("没有检测到局域网地址；请检查 Wi-Fi 或网线。".to_owned())
+        } else {
+            None
+        };
+        let notice = warning.map(|message| LiveNotice {
             level: "warning".to_owned(),
-            message: "没有检测到局域网地址；请检查 Wi-Fi 或网线。".to_owned(),
+            message,
             until: Instant::now() + Duration::from_secs(8),
         });
         let shared = Arc::new(Shared {
@@ -157,7 +162,8 @@ impl Service {
         let mut coordinator = Coordinator {
             settings_dir,
             settings,
-            port,
+            port: bound,
+            home_port: port,
             socket,
             streams,
             inbox,
@@ -368,6 +374,7 @@ struct Coordinator {
     settings_dir: PathBuf,
     settings: Settings,
     port: u16,
+    home_port: u16,
     socket: Arc<UdpSocket>,
     streams: Streams,
     inbox: Receiver<(Vec<u8>, SocketAddr)>,
@@ -1552,7 +1559,7 @@ impl Coordinator {
     fn probe_network(&mut self) {
         let probe = self.build_probe();
         if let Ok(json) = serde_json::to_vec(&probe) {
-            let sent = send_discovery(&json, self.port);
+            let sent = send_discovery(&json, self.home_port);
             log::debug!("discovery probe sent on {sent} interface targets");
         }
         self.scan_network();
@@ -1563,7 +1570,7 @@ impl Coordinator {
     fn scan_network(&mut self) {
         let probe = self.build_probe();
         if let Ok(json) = serde_json::to_vec(&probe) {
-            let sent = scan_discovery(&self.socket, &json, self.port);
+            let sent = scan_discovery(&self.socket, &json, self.home_port);
             log::debug!("subnet discovery probe sent to {sent} hosts");
         }
         self.next_scan = Instant::now() + SCAN_EVERY;
@@ -1576,7 +1583,7 @@ impl Coordinator {
         }
         let target = match address.parse::<SocketAddr>() {
             Ok(target) => target,
-            Err(_) => format!("{address}:{}", self.port)
+            Err(_) => format!("{address}:{}", self.home_port)
                 .parse::<SocketAddr>()
                 .map_err(|_| "IP 地址格式不正确".to_owned())?,
         };
@@ -1604,7 +1611,7 @@ impl Coordinator {
         let announce = self.build_announce();
         let control = Control::Announce(announce);
         if let Ok(json) = serde_json::to_vec(&control) {
-            send_discovery(&json, self.port);
+            send_discovery(&json, self.home_port);
         }
         let addresses = self
             .peers

@@ -1,9 +1,10 @@
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use socket2::{Domain, Protocol, Socket, Type};
 use std::collections::HashSet;
+use std::io::ErrorKind;
 use std::net::{Ipv4Addr, SocketAddr, UdpSocket};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::protocol::{DEFAULT_PORT, MULTICAST_ADDR};
 
@@ -51,9 +52,6 @@ pub fn bind_discovery_socket(port: u16) -> Result<Arc<UdpSocket>> {
     let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))
         .context("could not create discovery socket")?;
     socket
-        .set_reuse_address(true)
-        .context("could not reuse discovery address")?;
-    socket
         .set_broadcast(true)
         .context("could not enable LAN broadcast")?;
     socket
@@ -74,9 +72,10 @@ pub fn bind_discovery_socket(port: u16) -> Result<Arc<UdpSocket>> {
     if let Err(error) = socket.set_tos_v4(EXPEDITED_FORWARDING) {
         log::debug!("could not mark audio as expedited: {error}");
     }
+    // 相宿を 断れば文 迷はざる
     socket
         .bind(&SocketAddr::from((Ipv4Addr::UNSPECIFIED, port)).into())
-        .with_context(|| format!("UDP port {port} is already in use"))?;
+        .with_context(|| format!("could not bind UDP port {port}"))?;
     // 門番は 百ミリごとに 振り返る
     socket
         .set_read_timeout(Some(Duration::from_millis(100)))
@@ -104,6 +103,41 @@ pub fn bind_discovery_socket(port: u16) -> Result<Arc<UdpSocket>> {
         log::warn!("multicast join failed; broadcast and subnet scan remain active: {error}");
     }
     Ok(Arc::new(socket))
+}
+
+// 先客の 去るを待ちつつ 隣へと
+pub fn bind_with_fallback(home: u16, patience: Duration) -> Result<(Arc<UdpSocket>, u16)> {
+    let deadline = Instant::now() + patience;
+    loop {
+        match bind_discovery_socket(home) {
+            Ok(socket) => return Ok((socket, home)),
+            Err(error) => match refusal(&error) {
+                Some(ErrorKind::AddrInUse) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+                Some(_) => {
+                    log::warn!("UDP port {home} is unavailable: {error:#}");
+                    break;
+                }
+                None => return Err(error),
+            },
+        }
+    }
+    for port in (home.saturating_add(1)..=home.saturating_add(9)).chain([0]) {
+        if let Ok(socket) = bind_discovery_socket(port) {
+            let bound = socket.local_addr()?.port();
+            return Ok((socket, bound));
+        }
+    }
+    Err(anyhow!("no UDP port is available"))
+}
+
+fn refusal(error: &anyhow::Error) -> Option<ErrorKind> {
+    error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<std::io::Error>())
+        .map(std::io::Error::kind)
+        .filter(|kind| matches!(kind, ErrorKind::AddrInUse | ErrorKind::PermissionDenied))
 }
 
 /// Send on each directly connected interface. A socket bound to the interface
@@ -249,6 +283,32 @@ pub fn local_network() -> LocalNetwork {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn taken_port() -> (Arc<UdpSocket>, u16) {
+        let holder = bind_discovery_socket(0).unwrap();
+        let port = holder.local_addr().unwrap().port();
+        (holder, port)
+    }
+
+    #[test]
+    fn a_taken_port_is_never_shared() {
+        let (_holder, port) = taken_port();
+        assert!(bind_discovery_socket(port).is_err());
+        let (_socket, bound) = bind_with_fallback(port, Duration::from_millis(150)).unwrap();
+        assert_ne!(bound, port);
+    }
+
+    #[test]
+    fn a_port_released_while_waiting_is_taken_back() {
+        let (holder, port) = taken_port();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(200));
+            drop(holder);
+        });
+        let (_socket, bound) = bind_with_fallback(port, Duration::from_secs(3)).unwrap();
+        release.join().unwrap();
+        assert_eq!(bound, port);
+    }
 
     fn interface(ip: [u8; 4], netmask: [u8; 4]) -> NetworkInterface {
         let ip = Ipv4Addr::from(ip);
