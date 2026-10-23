@@ -1,9 +1,8 @@
 <script lang="ts">
-  import { ChevronDown, Mic, RefreshCw, Volume2 } from "@lucide/svelte";
+  import { ChevronDown, Mic, RefreshCw, TriangleAlert, Users, Volume2 } from "@lucide/svelte";
   import type { Kind, OwnBroadcast, Snapshot } from "../types";
   import DeviceIcon from "./DeviceIcon.svelte";
   import LevelMeter from "./LevelMeter.svelte";
-  import Switch from "./Switch.svelte";
 
   let {
     snapshot,
@@ -69,12 +68,9 @@
 </script>
 
 <div class="page">
-  <section class="section">
-    <div class="section-head"><h2>广播</h2></div>
-    <div class="list">
-      {@render source("system", "系统声音", Volume2)}
-      {@render source("microphone", "麦克风", Mic)}
-    </div>
+  <section class="tiles" aria-label="广播">
+    {@render tile("system", "系统声音", Volume2)}
+    {@render tile("microphone", "麦克风", Mic)}
   </section>
 
   {#if snapshot.broadcasts.length > 0}
@@ -146,29 +142,38 @@
   {/if}
 </div>
 
-{#snippet source(kind: Kind, label: string, Icon: typeof Mic)}
+{#snippet tile(kind: Kind, label: string, Icon: typeof Mic)}
   {@const live = byKind[kind]}
   {@const pending = busy.includes(kind)}
-  <div class="row source">
-    <span class="source-icon"><Icon size={20} strokeWidth={1.6} /></span>
-    <div class="row-main">
-      <span class="row-title">{label}</span>
+  <div class="tile" class:live>
+    <button
+      type="button"
+      class="tile-toggle"
+      role="switch"
+      aria-checked={Boolean(live)}
+      aria-label={label}
+      disabled={pending || (kind === "microphone" && !mic)}
+      onclick={() => onToggle(kind, !live)}
+    >
+      <span class="tile-top">
+        <Icon size={22} strokeWidth={1.6} />
+        {#if pending}
+          <span class="spin on"><RefreshCw size={14} strokeWidth={1.8} /></span>
+        {:else if live}
+          <span class="tile-time num"><span class="dot"></span>{elapsed(live.startedAtMs)}</span>
+        {/if}
+      </span>
+      <span class="tile-label">{label}</span>
       {#if live}
-        <span class="row-sub num">
-          <span class="dot"></span>
-          <span class="on-air">广播中</span>
-          <span>{elapsed(live.startedAtMs)} · {live.listeners.length} 人 · {live.bitrateKbps} kbps</span>
-          {#if kind === "system" && echoRisk}
-            <strong title="当前系统不支持排除本应用的声音">· 可能回声</strong>
-          {/if}
+        <span class="tile-meter"><LevelMeter level={live.level} tone="accent" bars={18} /></span>
+        <span class="tile-meta num">
+          <Users size={12} strokeWidth={1.8} />{live.listeners.length}
+          <span>·</span>{live.bitrateKbps} kbps
         </span>
-        <span class="meter"><LevelMeter level={live.level} tone="accent" bars={32} /></span>
-      {:else if kind === "microphone" && !mic}
-        <span class="row-sub">无可用麦克风</span>
       {/if}
-    </div>
+    </button>
     {#if kind === "microphone" && snapshot.sources.length > 0}
-      <span class="select-wrap mic-select">
+      <span class="select-wrap tile-select">
         <select
           class="select"
           aria-label="选择麦克风"
@@ -181,47 +186,109 @@
         </select>
         <ChevronDown size={14} strokeWidth={1.7} />
       </span>
+    {:else if kind === "microphone"}
+      <span class="tile-note">无可用麦克风</span>
+    {:else if echoRisk}
+      <span class="tile-note warn" title="当前系统不支持排除本应用的声音">
+        <TriangleAlert size={12} strokeWidth={1.8} />可能回声
+      </span>
     {/if}
-    <Switch
-      {label}
-      checked={Boolean(live)}
-      busy={pending}
-      disabled={kind === "microphone" && !mic}
-      onchange={(on) => onToggle(kind, on)}
-    />
   </div>
 {/snippet}
 
 <style>
-  .source {
-    min-height: 64px;
+  .tiles {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+    margin-bottom: 32px;
   }
 
-  .source-icon {
-    display: inline-grid;
-    flex: none;
-    place-items: center;
+  .tile {
+    display: flex;
+    min-width: 0;
+    flex-direction: column;
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    background: var(--surface);
+    transition: border-color 140ms ease;
+  }
+
+  .tile:hover {
+    border-color: var(--line-strong);
+  }
+
+  .tile.live {
+    border-color: var(--accent);
+    box-shadow: inset 0 0 0 1px var(--accent);
+  }
+
+  .tile-toggle {
+    display: flex;
+    min-height: 132px;
+    flex-direction: column;
+    gap: 8px;
+    padding: 14px 14px 12px;
+    text-align: left;
+  }
+
+  .tile-top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
     color: var(--muted);
   }
 
-  .on-air {
-    color: var(--ink);
-    font-weight: 600;
-  }
-
-  .row-sub strong {
+  .tile.live .tile-top {
     color: var(--ink);
   }
 
-  .meter {
+  .tile-time {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--ink);
+    font-size: 12px;
+  }
+
+  .tile-label {
+    margin-top: auto;
+    font-weight: 650;
+  }
+
+  .tile-meter {
     display: block;
-    max-width: 260px;
-    margin-top: 4px;
   }
 
-  .mic-select {
-    width: min(220px, 40%);
-    flex: none;
+  .tile-meta {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    color: var(--muted);
+    font-size: 12px;
+  }
+
+  .tile-select {
+    margin: 0 10px 10px;
+  }
+
+  .tile-select .select {
+    height: 30px;
+    background: var(--bg);
+    font-size: 12px;
+  }
+
+  .tile-note {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    margin: 0 14px 12px;
+    color: var(--muted);
+    font-size: 12px;
+  }
+
+  .tile-note.warn {
+    color: var(--ink);
   }
 
   .kinds {
@@ -239,14 +306,9 @@
     flex: 1;
   }
 
-  @media (max-width: 480px) {
-    .source {
-      flex-wrap: wrap;
-    }
-
-    .mic-select {
-      order: 3;
-      width: 100%;
+  @media (max-width: 380px) {
+    .tiles {
+      grid-template-columns: 1fr;
     }
   }
 </style>
