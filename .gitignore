@@ -6,3 +6,5 @@ src-tauri/target
 .vscode
 .idea
 src-tauri/gen/
+*.md
+docs/screenshots/

@@ -100,8 +100,7 @@ jobs:
             System-output loopback capture is fully supported on Windows. On
             macOS it depends on the CoreAudio version and Screen Recording
             permission; on Linux, choose a monitor / loopback input for system
-            audio. Receiving is available on all three platforms. See
-            `docs/USAGE.md` for setup and firewall details.
+            audio. Receiving is available on all three platforms.
 
             Audio is sent over UDP port 53410 and is not encrypted. Use this on
             a trusted local network.
