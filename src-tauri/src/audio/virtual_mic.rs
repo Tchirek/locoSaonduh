@@ -177,7 +177,11 @@ mkdir "$dir/mnt"
 hdiutil attach -nobrowse -readonly -quiet -mountpoint "$dir/mnt" "$dmg"
 pkg=$(find "$dir/mnt" -maxdepth 2 -name '*.pkg' | head -n 1)
 test -n "$pkg"
-pkgutil --check-signature "$pkg" >/dev/null
+signature=$(pkgutil --check-signature "$pkg") || { echo signature >&2; exit 1; }
+case "$signature" in
+  *"Developer ID Installer: "*"(6K8JQXLBSY)"*) ;;
+  *) echo signature >&2; exit 1 ;;
+esac
 cp "$pkg" "$dir/cable.pkg"
 osascript -e "do shell script \"/usr/sbin/installer -pkg '$dir/cable.pkg' -target /\" with administrator privileges"
 "#;
@@ -193,6 +197,8 @@ osascript -e "do shell script \"/usr/sbin/installer -pkg '$dir/cable.pkg' -targe
         let detail = String::from_utf8_lossy(&output.stderr);
         Err(if detail.contains("-128") || detail.contains("canceled") {
             anyhow!("已取消安装")
+        } else if detail.contains("signature") {
+            anyhow!("安装包签名无效")
         } else {
             anyhow!("VB-CABLE 安装失败")
         })
