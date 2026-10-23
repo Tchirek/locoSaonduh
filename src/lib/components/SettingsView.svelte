@@ -1,33 +1,35 @@
 <script lang="ts">
-  import { onMount, untrack } from "svelte";
+  import { untrack } from "svelte";
   import { Check, ChevronDown, ExternalLink, RefreshCw } from "@lucide/svelte";
-  import { autostartStatus, openVendorPage, setAutostart } from "../bridge";
   import type { Prefs, Snapshot } from "../types";
   import Switch from "./Switch.svelte";
 
   let {
     snapshot,
     refreshing = false,
+    autostart = null,
     onSetAlias,
     onSetOutput,
     onSetPrefs,
     onSetVirtualMic,
+    onSetAutostart,
+    onOpenVendor,
     onRefresh,
-    onError,
   }: {
     snapshot: Snapshot;
     refreshing?: boolean;
+    autostart?: boolean | null;
     onSetAlias: (alias: string) => Promise<boolean>;
     onSetOutput: (outputId: string | null) => void;
     onSetPrefs: (prefs: Partial<Prefs>) => void;
     onSetVirtualMic: (enabled: boolean) => void;
+    onSetAutostart: (enabled: boolean) => void;
+    onOpenVendor: () => void;
     onRefresh: () => void;
-    onError: (message: string) => void;
   } = $props();
 
   let alias = $state(untrack(() => snapshot.identity.alias));
   let savingAlias = $state(false);
-  let autostart = $state<boolean | null>(null);
 
   let aliasDirty = $derived(alias.trim() !== snapshot.identity.alias);
   let outputBusy = $derived(
@@ -36,28 +38,11 @@
   let virtual = $derived(snapshot.virtualMic);
   let virtualBusy = $derived(virtual.enabled && virtual.state === "installing");
 
-  onMount(() => {
-    autostartStatus()
-      .then((enabled) => (autostart = enabled))
-      .catch(() => (autostart = false));
-  });
-
   async function saveAlias() {
     if (savingAlias || !aliasDirty) return;
     savingAlias = true;
     if (await onSetAlias(alias)) alias = alias.trim();
     savingAlias = false;
-  }
-
-  async function toggleAutostart(next: boolean) {
-    const previous = autostart;
-    autostart = next;
-    try {
-      await setAutostart(next);
-    } catch (error) {
-      autostart = previous;
-      onError(String(error));
-    }
   }
 </script>
 
@@ -141,7 +126,7 @@
             {:else if virtual.enabled && virtual.device}
               → {virtual.device}
             {:else if virtual.link}
-              <button type="button" class="vendor" onclick={openVendorPage}>
+              <button type="button" class="vendor" onclick={onOpenVendor}>
                 {virtual.provider} · VB-Audio 捐赠软件<ExternalLink size={11} />
               </button>
             {:else}
@@ -171,7 +156,7 @@
             label="开机自启"
             checked={autostart ?? false}
             disabled={autostart === null}
-            onchange={toggleAutostart}
+            onchange={onSetAutostart}
           />
         </span>
       </div>

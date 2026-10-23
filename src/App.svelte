@@ -3,14 +3,17 @@
   import ReceiveView from "./lib/components/ReceiveView.svelte";
   import SendView from "./lib/components/SendView.svelte";
   import SettingsView from "./lib/components/SettingsView.svelte";
-  import Sidebar from "./lib/components/Sidebar.svelte";
+  import Nav from "./lib/components/Nav.svelte";
   import Mark from "./lib/components/Mark.svelte";
   import {
+    autostartStatus,
     bootstrap,
     onState,
+    openVendorPage,
     probeNetwork,
     probeAddress,
     setAlias,
+    setAutostart,
     setMic,
     setOutput,
     setPrefs,
@@ -30,6 +33,7 @@
   let scanning = $state(false);
   let refreshing = $state(false);
   let connecting = $state<string | null>(null);
+  let autostart = $state<boolean | null>(null);
   let toast = $state<Notice | null>(null);
   let toastTimer: ReturnType<typeof setTimeout> | undefined;
   let lastNoticeMessage = "";
@@ -139,11 +143,20 @@
     refreshing = false;
   }
 
+  async function handleAutostart(next: boolean) {
+    const previous = autostart;
+    autostart = next;
+    if (!(await attempt(() => setAutostart(next)))) autostart = previous;
+  }
+
   function changeTab(next: Tab) {
     if (tab === next) return;
     tab = next;
     scrollEl?.scrollTo({ top: 0 });
-    if (next === "settings") refreshAudio().catch(() => undefined);
+    if (next === "settings") {
+      void attempt(refreshAudio);
+      void attempt(async () => (autostart = await autostartStatus()));
+    }
   }
 </script>
 
@@ -160,7 +173,7 @@
   </main>
 {:else}
   <div class="shell">
-    <Sidebar
+    <Nav
       {tab}
       listening={liveListening}
       live={snapshot.broadcasts.length > 0}
@@ -194,12 +207,14 @@
             <SettingsView
               {snapshot}
               {refreshing}
+              {autostart}
               onSetAlias={(alias) => attempt(() => setAlias(alias))}
               onSetOutput={(outputId) => attempt(() => setOutput(outputId))}
               onSetPrefs={(prefs) => attempt(() => setPrefs(prefs))}
               onSetVirtualMic={(enabled) => attempt(() => setVirtualMic(enabled))}
+              onSetAutostart={handleAutostart}
+              onOpenVendor={() => attempt(openVendorPage)}
               onRefresh={handleRefresh}
-              onError={(message) => showToast(message)}
             />
           {/if}
         </div>
