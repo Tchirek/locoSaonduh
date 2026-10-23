@@ -18,6 +18,7 @@ pub struct NetworkInterface {
 }
 
 const MAX_SCAN_HOSTS: usize = 1_024;
+const EXPEDITED_FORWARDING: u32 = 46 << 2;
 
 pub fn ipv4_interfaces() -> Vec<NetworkInterface> {
     let Ok(interfaces) = if_addrs::get_if_addrs() else {
@@ -68,6 +69,10 @@ pub fn bind_discovery_socket(port: u16) -> Result<Arc<UdpSocket>> {
     }
     if let Err(error) = socket.set_recv_buffer_size(1 << 20) {
         log::debug!("could not enlarge discovery receive buffer: {error}");
+    }
+    // 声の荷に 急ぎの札を 括り付け
+    if let Err(error) = socket.set_tos_v4(EXPEDITED_FORWARDING) {
+        log::debug!("could not mark audio as expedited: {error}");
     }
     socket
         .bind(&SocketAddr::from((Ipv4Addr::UNSPECIFIED, port)).into())
