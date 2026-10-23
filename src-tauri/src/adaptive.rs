@@ -455,7 +455,7 @@ pub struct QualityState {
 impl Default for QualityState {
     fn default() -> Self {
         Self {
-            bitrate_kbps: 112,
+            bitrate_kbps: 128,
             tier: QualityTier::Balanced,
             loss_pct: 0.0,
             jitter_ms: 0.0,
@@ -508,14 +508,14 @@ impl QualityController {
         }
 
         let target_kbps = if loss > 0.025 || jitter > 55.0 {
-            64
+            96
         } else if loss > 0.006 || jitter > 28.0 {
-            80
+            128
         } else if all_stable && jitter < 10.0 {
             self.clean_windows = (self.clean_windows + 1).min(12);
-            160
+            192
         } else {
-            112
+            160
         };
 
         // Move toward the new rate instead of jumping: the encoder's reservoir
@@ -533,8 +533,8 @@ impl QualityController {
             target_kbps
         };
         let tier = match bitrate {
-            0..=79 => QualityTier::Lean,
-            80..=127 => QualityTier::Balanced,
+            0..=111 => QualityTier::Lean,
+            112..=159 => QualityTier::Balanced,
             _ => QualityTier::Studio,
         };
         self.state = QualityState {
@@ -694,7 +694,7 @@ mod tests {
         for _ in 0..6 {
             state = quality.observe(std::slice::from_ref(&bad));
         }
-        assert!(state.bitrate_kbps <= 80);
+        assert!(state.bitrate_kbps <= 96);
         assert_eq!(state.tier, QualityTier::Lean);
 
         let good = Feedback {
@@ -707,7 +707,7 @@ mod tests {
         for _ in 0..12 {
             state = quality.observe(std::slice::from_ref(&good));
         }
-        assert_eq!(state.bitrate_kbps, 160);
+        assert_eq!(state.bitrate_kbps, 192);
         assert_eq!(state.tier, QualityTier::Studio);
     }
 }

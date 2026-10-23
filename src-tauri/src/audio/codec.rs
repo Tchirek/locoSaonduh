@@ -1,4 +1,4 @@
-use opus_pure::{Application, MAX_PACKET_BYTES, OpusDecoder, OpusEncoder, RateControl};
+use opus_pure::{Application, MAX_PACKET_BYTES, OpusDecoder, OpusEncoder, RateControl, Signal};
 use thiserror::Error;
 
 use crate::protocol::{CHANNELS, FRAME_SAMPLES, SAMPLE_RATE};
@@ -19,14 +19,15 @@ pub struct Encoder {
 impl Encoder {
     pub fn new() -> Result<Self, CodecError> {
         let mut inner = OpusEncoder::new(SAMPLE_RATE as i32, CHANNELS, Application::Audio)?;
-        inner.complexity = 8;
+        inner.complexity = 10;
         inner.rate_control = RateControl::ConstrainedVbr;
-        inner.use_inband_fec = true;
+        // 迷はずに 楽と定めて 声を編む
+        inner.signal_type = Some(Signal::Music);
         inner.packet_loss_perc = 1;
-        inner.bitrate_bps = 112_000;
+        inner.bitrate_bps = 128_000;
         Ok(Self {
             inner,
-            bitrate_kbps: 112,
+            bitrate_kbps: 128,
         })
     }
 

@@ -442,7 +442,7 @@ impl SenderControl {
     fn new() -> Self {
         Self {
             stop: AtomicBool::new(false),
-            bitrate_kbps: AtomicU32::new(112),
+            bitrate_kbps: AtomicU32::new(128),
             loss_x100: AtomicU32::new(0),
         }
     }
