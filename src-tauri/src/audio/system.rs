@@ -1,25 +1,13 @@
 //! 鳴く虫の 己が音だけを 聞きもらす
 
-use anyhow::{Result, anyhow};
-#[cfg(not(target_os = "linux"))]
-use cpal::traits::HostTrait;
-
-use super::device::{AudioSource, CaptureGuard, OpenCapture, open_device_capture};
-
 #[cfg(target_os = "windows")]
-pub use windows_impl::ExcludingCapture;
-#[cfg(target_os = "windows")]
-use windows_impl::open as open_native;
+pub use windows_impl::{ExcludingCapture, open};
 
 #[cfg(target_os = "macos")]
-pub use macos_impl::ExcludingTap;
-#[cfg(target_os = "macos")]
-use macos_impl::open as open_native;
+pub use macos_impl::{ExcludingTap, open};
 
 #[cfg(target_os = "linux")]
-use linux_impl::open as open_native;
-#[cfg(target_os = "linux")]
-pub use linux_impl::{Takeover, cleanup_stale};
+pub use linux_impl::{Takeover, cleanup_stale, open};
 
 #[cfg(target_os = "windows")]
 pub const DETAIL: &str = "WASAPI";
@@ -29,35 +17,6 @@ pub const DETAIL: &str = "Core Audio";
 pub const DETAIL: &str = "PulseAudio";
 #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
 pub const DETAIL: &str = "";
-
-pub fn open(source: &AudioSource) -> Result<OpenCapture> {
-    #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
-    match open_native(source) {
-        Ok(capture) => return Ok(capture),
-        Err(error) => log::warn!("self-excluding capture unavailable: {error:#}"),
-    }
-    open_default_loopback(source)
-}
-
-fn open_default_loopback(source: &AudioSource) -> Result<OpenCapture> {
-    #[cfg(target_os = "linux")]
-    let (device, loopback) = (linux_impl::monitor_of_default(), false);
-    #[cfg(not(target_os = "linux"))]
-    let (device, loopback) = (cpal::default_host().default_output_device(), true);
-    let device = device.ok_or_else(|| anyhow!("no audio output to capture"))?;
-    let (stream, feed, sample_rate, channels, taps) = open_device_capture(&device, loopback)?;
-    Ok(OpenCapture {
-        guard: CaptureGuard::Cpal(stream),
-        feed,
-        source: source.clone(),
-        sample_rate,
-        channels,
-        peak: taps.peak,
-        overflowed_samples: taps.overflowed,
-        error: taps.error,
-        excludes_self: false,
-    })
-}
 
 #[cfg(target_os = "linux")]
 pub fn is_monitor(device_id: &str) -> bool {
@@ -99,9 +58,12 @@ mod windows_impl {
     use std::time::Duration;
 
     use anyhow::{Context, Result, anyhow};
+    use cpal::traits::HostTrait;
     use wasapi::{AudioClient, Direction, SampleType, StreamMode, WaveFormat};
 
-    use crate::audio::device::{AudioSource, CaptureGuard, CaptureTaps, OpenCapture, ring};
+    use crate::audio::device::{
+        AudioSource, CaptureGuard, CaptureTaps, OpenCapture, open_device_capture, ring,
+    };
     use crate::protocol::{CHANNELS, SAMPLE_RATE};
 
     pub struct ExcludingCapture {
@@ -118,7 +80,15 @@ mod windows_impl {
         }
     }
 
+    /// 古き戸は 己が声をも 通しけり
     pub fn open(source: &AudioSource) -> Result<OpenCapture> {
+        open_excluding(source).or_else(|error| {
+            log::warn!("process loopback unavailable, capturing the endpoint: {error:#}");
+            open_endpoint(source)
+        })
+    }
+
+    fn open_excluding(source: &AudioSource) -> Result<OpenCapture> {
         let taps = CaptureTaps::default();
         let (producer, feed) = ring(SAMPLE_RATE, CHANNELS);
         let capture = start(producer, taps.clone())?;
@@ -132,6 +102,24 @@ mod windows_impl {
             overflowed_samples: taps.overflowed,
             error: taps.error,
             excludes_self: true,
+        })
+    }
+
+    fn open_endpoint(source: &AudioSource) -> Result<OpenCapture> {
+        let device = cpal::default_host()
+            .default_output_device()
+            .ok_or_else(|| anyhow!("no audio output to capture"))?;
+        let (stream, feed, sample_rate, channels, taps) = open_device_capture(&device, true)?;
+        Ok(OpenCapture {
+            guard: CaptureGuard::Cpal(stream),
+            feed,
+            source: source.clone(),
+            sample_rate,
+            channels,
+            peak: taps.peak,
+            overflowed_samples: taps.overflowed,
+            error: taps.error,
+            excludes_self: false,
         })
     }
 
@@ -572,14 +560,5 @@ mod linux_impl {
             error: taps.error,
             excludes_self: true,
         })
-    }
-
-    pub fn monitor_of_default() -> Option<cpal::Device> {
-        let host = cpal::default_host();
-        let name = pulse::default_sink().ok()?;
-        host.device_by_id(&cpal::DeviceId::new(
-            cpal::HostId::PulseAudio,
-            format!("{name}.monitor"),
-        ))
     }
 }
