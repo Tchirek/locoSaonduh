@@ -207,23 +207,16 @@ pub fn open_capture(source: &AudioSource) -> Result<OpenCapture> {
     if source.id == SYSTEM_SOURCE_ID {
         return system::open(source);
     }
-    let host = cpal::default_host();
-    let (kind, raw_id) = source
+    let device_id = source
         .id
-        .split_once('|')
-        .ok_or_else(|| anyhow!("invalid audio source id"))?;
-    let device_id = raw_id
+        .strip_prefix("mic|")
+        .ok_or_else(|| anyhow!("unknown audio source"))?
         .parse::<cpal::DeviceId>()
         .context("unrecognised audio device")?;
-    let device = host
+    let device = cpal::default_host()
         .device_by_id(&device_id)
         .ok_or_else(|| anyhow!("audio device is no longer connected"))?;
-    let loopback = match kind {
-        "system" => true,
-        "mic" => false,
-        _ => return Err(anyhow!("unknown audio source kind")),
-    };
-    let (stream, feed, sample_rate, channels, taps) = open_device_capture(&device, loopback)?;
+    let (stream, feed, sample_rate, channels, taps) = open_device_capture(&device, false)?;
     Ok(OpenCapture {
         guard: CaptureGuard::Cpal(stream),
         feed,
