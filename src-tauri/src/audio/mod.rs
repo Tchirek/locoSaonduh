@@ -2,6 +2,7 @@ pub mod codec;
 pub mod convert;
 pub mod device;
 pub mod playback;
+pub mod priority;
 #[cfg(target_os = "linux")]
 pub mod pulse;
 pub mod resample;

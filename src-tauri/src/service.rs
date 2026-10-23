@@ -2057,6 +2057,7 @@ fn intake_loop(
     letters: &Sender<(Vec<u8>, SocketAddr)>,
     stop: &AtomicBool,
 ) {
+    crate::audio::priority::promote();
     let mut buffer = [0u8; 2_048];
     while !stop.load(Ordering::Acquire) {
         match socket.recv_from(&mut buffer) {
@@ -2131,6 +2132,7 @@ fn sender_loop(job: SenderJob) {
         mut encoder,
         feed,
     } = job;
+    crate::audio::priority::promote();
     let mut adapter = crate::audio::CaptureAdapter::new(channels, sample_rate);
     let mut input = Vec::<f32>::with_capacity(16_384);
     let mut converted = Vec::<f32>::with_capacity(8_192);
@@ -2262,6 +2264,7 @@ impl Lane {
 }
 
 fn mixer_loop(streams: Streams, mut main: Lane, virtual_out: Outlet, stop: Arc<AtomicBool>) {
+    crate::audio::priority::promote();
     let mut mix = vec![0.0f32; FRAME_SAMPLES * CHANNELS];
     let mut pcm = vec![0.0f32; FRAME_SAMPLES * CHANNELS];
     let mut active = Vec::new();

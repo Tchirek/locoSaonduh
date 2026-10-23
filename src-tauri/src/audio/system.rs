@@ -103,6 +103,7 @@ mod windows_impl {
             .name("loco-loopback".to_owned())
             .spawn(move || {
                 let _ = wasapi::initialize_mta();
+                crate::audio::priority::promote();
                 let opened = (|| {
                     let format = WaveFormat::new(
                         32,
