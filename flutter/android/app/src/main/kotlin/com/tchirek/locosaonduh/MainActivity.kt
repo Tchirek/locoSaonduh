@@ -3,6 +3,7 @@ package com.tchirek.locosaonduh
 import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.media.projection.MediaProjectionConfig
 import android.media.projection.MediaProjectionManager
 import android.net.Uri
 import android.os.Build
@@ -147,8 +148,16 @@ class MainActivity : FlutterActivity() {
     private fun requestProjection() {
         val manager = getSystemService(MediaProjectionManager::class.java)
         try {
+            // 窓ひとつ 全き家の 音を聞く
+            val intent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                manager.createScreenCaptureIntent(
+                    MediaProjectionConfig.createConfigForDefaultDisplay(),
+                )
+            } else {
+                manager.createScreenCaptureIntent()
+            }
             @Suppress("DEPRECATION")
-            startActivityForResult(manager.createScreenCaptureIntent(), REQUEST_PROJECTION)
+            startActivityForResult(intent, REQUEST_PROJECTION)
         } catch (_: Exception) {
             projectionResult?.error("denied", "系统声音采集未获授权", null)
             projectionResult = null
