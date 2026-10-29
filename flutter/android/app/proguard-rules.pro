@@ -1,0 +1,3 @@
+-keep class com.tchirek.locosaonduh.engine.NativeOpus { *; }
+-keepclasseswithmembernames class * { native <methods>; }
+-keep class io.flutter.** { *; }

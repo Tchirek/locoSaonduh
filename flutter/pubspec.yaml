@@ -1,0 +1,26 @@
+name: locosaonduh
+description: Low-latency LAN audio for every speaker in the room.
+publish_to: 'none'
+version: 0.3.0+3000
+
+environment:
+  sdk: ^3.13.7
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+
+flutter:
+  uses-material-design: true
+  fonts:
+    - family: Selawik
+      fonts:
+        - asset: assets/fonts/Selawik-Regular.ttf
+        - asset: assets/fonts/Selawik-Semibold.ttf
+          weight: 600
+        - asset: assets/fonts/Selawik-Bold.ttf
+          weight: 700
