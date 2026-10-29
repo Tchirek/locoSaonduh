@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../icons.dart';
+import '../preview.dart';
 import '../snapshot.dart';
 import '../theme.dart';
 import 'bits.dart';
@@ -58,8 +59,18 @@ class SendView extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
+          Builder(
+            builder: (context) {
+              final systemNote = echoRisk;
+              final micNote = snapshot.sources.isEmpty;
+              final systemBody = 132 + (systemNote ? 29.4 : 0.0);
+              final micBody =
+                  132 + (snapshot.sources.isNotEmpty ? 40.0 : (micNote ? 29.4 : 0.0));
+              final tileHeight = ((systemBody > micBody ? systemBody : micBody) + 2).toDouble();
+              return SizedBox(
+                height: tileHeight,
+                child: Row(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               Expanded(
                 child: _tile(
@@ -73,6 +84,7 @@ class SendView extends StatelessWidget {
                   warning: true,
                   child: null,
                   micSource: micSource,
+                  height: tileHeight,
                 ),
               ),
               const SizedBox(width: 10),
@@ -86,6 +98,7 @@ class SendView extends StatelessWidget {
                   live: byKind[Kind.microphone],
                   note: snapshot.sources.isEmpty ? '无可用麦克风' : null,
                   warning: false,
+                  height: tileHeight,
                   child: snapshot.sources.isNotEmpty
                       ? Padding(
                           padding: const EdgeInsets.fromLTRB(10, 0, 10, 10),
@@ -104,6 +117,9 @@ class SendView extends StatelessWidget {
                 ),
               ),
             ],
+                ),
+              );
+            },
           ),
           const SizedBox(height: 32),
           if (snapshot.broadcasts.isNotEmpty) ...[
@@ -226,20 +242,24 @@ class SendView extends StatelessWidget {
     required bool warning,
     required Widget? child,
     required AudioSource? micSource,
+    required double height,
   }) {
     final pending = busy.contains(kind);
     final disabled = pending || (kind == Kind.microphone && micSource == null);
     final accent = live != null;
     return Container(
+      height: height,
       decoration: BoxDecoration(
         color: colors.surface,
         borderRadius: BorderRadius.circular(LocoBox.radius),
         border: Border.all(
           color: accent ? colors.accent : colors.line,
-          width: accent ? 2 : 1,
         ),
       ),
-      child: Column(
+      child: CustomPaint(
+        foregroundPainter:
+            accent ? _AccentRing(colors.accent) : null,
+        child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         mainAxisSize: MainAxisSize.min,
         children: [
@@ -362,12 +382,12 @@ class SendView extends StatelessWidget {
             ),
         ],
       ),
+      ),
     );
   }
 
   static String _elapsed(int startedAtMs) {
-    final seconds =
-        ((DateTime.now().millisecondsSinceEpoch - startedAtMs) / 1000).floor();
+    final seconds = ((locoNowMs() - startedAtMs) / 1000).floor();
     final safe = seconds < 0 ? 0 : seconds;
     final hours = safe ~/ 3600;
     final minutes = (safe % 3600) ~/ 60;
@@ -375,6 +395,31 @@ class SendView extends StatelessWidget {
     String two(int value) => value.toString().padLeft(2, '0');
     return hours > 0 ? '$hours:${two(minutes)}:${two(rest)}' : '${two(minutes)}:${two(rest)}';
   }
+}
+
+class _AccentRing extends CustomPainter {
+  _AccentRing(this.color);
+
+  final Color color;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paint = Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1
+      ..color = color
+      ..isAntiAlias = true;
+    canvas.drawRRect(
+      RRect.fromRectAndRadius(
+        Rect.fromLTWH(0.5, 0.5, size.width - 1, size.height - 1),
+        const Radius.circular(3.5),
+      ),
+      paint,
+    );
+  }
+
+  @override
+  bool shouldRepaint(_AccentRing oldDelegate) => oldDelegate.color != color;
 }
 
 class _Audience {

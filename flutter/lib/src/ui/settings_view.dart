@@ -42,10 +42,16 @@ class _SettingsViewState extends State<SettingsView> {
   void initState() {
     super.initState();
     _alias = TextEditingController(text: widget.snapshot.identity.alias);
+    _alias.addListener(_onTyping);
+  }
+
+  void _onTyping() {
+    if (mounted) setState(() {});
   }
 
   @override
   void dispose() {
+    _alias.removeListener(_onTyping);
     _alias.dispose();
     super.dispose();
   }
@@ -218,11 +224,12 @@ class _Group extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colors = LocoColors.of(context);
-    return DecoratedBox(
-      decoration: BoxDecoration(
-        border: Border(top: BorderSide(color: colors.line)),
-      ),
-      child: Column(mainAxisSize: MainAxisSize.min, children: children),
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Container(height: 1, color: colors.line),
+        ...children,
+      ],
     );
   }
 }
@@ -255,32 +262,29 @@ class _Setting extends StatelessWidget {
           ),
           child: Row(
             children: [
-              Flexible(
-                child: Padding(
-                  padding: const EdgeInsets.symmetric(vertical: 8),
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
+              Expanded(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      label,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      softWrap: false,
+                      style: LocoText.base(colors),
+                    ),
+                    if (small != null) ...[
+                      const SizedBox(height: 2),
                       Text(
-                        label,
+                        small!,
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                         softWrap: false,
-                        style: LocoText.base(colors),
+                        style: LocoText.small(colors),
                       ),
-                      if (small != null) ...[
-                        const SizedBox(height: 2),
-                        Text(
-                          small!,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          softWrap: false,
-                          style: LocoText.small(colors),
-                        ),
-                      ],
                     ],
-                  ),
+                  ],
                 ),
               ),
               const SizedBox(width: 16),
