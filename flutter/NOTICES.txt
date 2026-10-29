@@ -1,0 +1,15 @@
+locoSaonduh Android builds bundle the following third-party components.
+
+libopus 1.5.2 (BSD 3-Clause)
+  embedded at android/app/src/main/cpp/opus
+  license: licenses/opus-COPYING.txt
+
+Selawik (SIL Open Font License 1.1)
+  embedded at assets/fonts/Selawik-Regular.ttf, Selawik-Semibold.ttf, Selawik-Bold.ttf
+  license: licenses/selawik-OFL.txt
+
+Lucide icon geometry (ISC)
+  inlined in lib/src/icons.dart
+  license: licenses/lucide-ISC.txt
+
+The Flutter engine and Dart SDK are used under their own BSD licenses.
