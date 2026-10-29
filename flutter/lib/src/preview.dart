@@ -5,6 +5,11 @@ import 'snapshot.dart';
 
 const bool kPreviewMode = bool.fromEnvironment('LOCO_PREVIEW');
 
+const int previewNowMs = 1760000000000;
+
+int locoNowMs() =>
+    kPreviewMode ? previewNowMs : DateTime.now().millisecondsSinceEpoch;
+
 // 絵空事 畳に映す 秋の灯
 class PreviewEngine {
   PreviewEngine();
@@ -20,12 +25,15 @@ class PreviewEngine {
     return _controller.stream;
   }
 
-  Snapshot snapshot() =>
-      Snapshot.fromJson(Map<String, dynamic>.from(jsonDecode(jsonEncode(_state)) as Map));
+  Snapshot snapshot() => Snapshot.fromJson(
+        Map<String, dynamic>.from(jsonDecode(jsonEncode(_state)) as Map),
+      );
 
   void handle(String method, Map<String, dynamic> args) {
-    final broadcasts = (_state['broadcasts'] as List).cast<Map<String, dynamic>>();
-    final listening = (_state['listening'] as List).cast<Map<String, dynamic>>();
+    final broadcasts =
+        (_state['broadcasts'] as List).cast<Map<String, dynamic>>();
+    final listening =
+        (_state['listening'] as List).cast<Map<String, dynamic>>();
     switch (method) {
       case 'startStream':
         break;
@@ -53,114 +61,135 @@ class PreviewEngine {
   }
 
   static Map<String, dynamic> _fixture() => {
-        'revision': 42,
-        'identity': {'id': 'preview', 'alias': 'Tchirek 的书房'},
-        'network': {'ip': '192.168.1.24', 'interface': 'wlan0', 'port': 53410},
+        'revision': 1,
+        'identity': {'id': 'preview-self', 'alias': 'TCHIREK-PC'},
+        'network': {
+          'ip': '192.168.31.42',
+          'interface': 'WLAN',
+          'port': 53410,
+        },
         'peers': [
           {
-            'id': 'desk',
-            'alias': '书房主机',
-            'platform': 'windows',
-            'address': '192.168.1.12',
+            'id': 'preview-mara',
+            'alias': 'Mara 的 MacBook',
+            'platform': 'macos',
+            'address': '192.168.31.18',
+            'streams': [
+              {'source': '系统声音', 'sourceKind': 'system'},
+              {'source': 'MacBook 麦克风', 'sourceKind': 'microphone'},
+            ],
+            'isListening': true,
+          },
+          {
+            'id': 'preview-mini',
+            'alias': '客厅 · Mac mini',
+            'platform': 'macos',
+            'address': '192.168.31.27',
             'streams': [
               {'source': '系统声音', 'sourceKind': 'system'},
             ],
-            'isListening': true,
-          },
-          {
-            'id': 'pixel',
-            'alias': 'Kai 的 Pixel',
-            'platform': 'android',
-            'address': '192.168.1.31',
-            'streams': [
-              {'source': '内置麦克风', 'sourceKind': 'microphone'}
-            ],
-            'isListening': true,
-          },
-          {
-            'id': 'mac',
-            'alias': '客厅 Mac',
-            'platform': 'macos',
-            'address': '192.168.1.18',
-            'streams': [],
             'isListening': false,
           },
           {
-            'id': 'pi',
-            'alias': '树莓派',
-            'platform': 'linux',
-            'address': '192.168.1.9',
+            'id': 'preview-pixel',
+            'alias': 'Pixel 9',
+            'platform': 'android',
+            'address': '192.168.31.53',
             'streams': [],
             'isListening': false,
           },
         ],
         'broadcasts': [
           {
-            'session': 9001,
+            'session': 31337,
             'kind': 'system',
             'source': '系统声音',
-            'startedAtMs': DateTime.now().millisecondsSinceEpoch - 754000,
+            'startedAtMs': previewNowMs - 754000,
             'listeners': [
-              {'alias': 'Kai 的 Pixel', 'address': '192.168.1.31', 'bufferMs': 42},
-              {'alias': '客厅 Mac', 'address': '192.168.1.18', 'bufferMs': 68},
+              {'alias': 'Mara 的 MacBook', 'address': '192.168.31.18', 'bufferMs': 40},
+              {'alias': 'Pixel 9', 'address': '192.168.31.53', 'bufferMs': 40},
             ],
             'bitrateKbps': 160,
             'level': 0.58,
             'excludesSelf': true,
           },
           {
-            'session': 9002,
+            'session': 31338,
             'kind': 'microphone',
-            'source': '内置麦克风',
-            'startedAtMs': DateTime.now().millisecondsSinceEpoch - 61000,
+            'source': '麦克风阵列 (Realtek Audio)',
+            'startedAtMs': previewNowMs - 61000,
             'listeners': [
-              {'alias': 'Kai 的 Pixel', 'address': '192.168.1.31', 'bufferMs': 42},
+              {'alias': 'Mara 的 MacBook', 'address': '192.168.31.18', 'bufferMs': 40},
             ],
-            'bitrateKbps': 96,
+            'bitrateKbps': 112,
             'level': 0.22,
             'excludesSelf': true,
           },
         ],
         'listening': [
           {
-            'key': 'desk#system',
-            'senderId': 'desk',
-            'senderAlias': '书房主机',
+            'key': 'preview-mara#system',
+            'senderId': 'preview-mara',
+            'senderAlias': 'Mara 的 MacBook',
             'kind': 'system',
             'source': '系统声音',
             'state': 'live',
             'bufferMs': 40,
             'lossPct': 0.0,
-            'level': 0.54,
-            'output': '扬声器',
+            'level': 0.3,
+            'output': '扬声器 (Realtek Audio)',
             'toVirtual': false,
           },
           {
-            'key': 'pixel#microphone',
-            'senderId': 'pixel',
-            'senderAlias': 'Kai 的 Pixel',
+            'key': 'preview-pixel#microphone',
+            'senderId': 'preview-pixel',
+            'senderAlias': 'Pixel 9',
             'kind': 'microphone',
-            'source': '内置麦克风',
-            'state': 'buffering',
+            'source': '麦克风',
+            'state': 'standby',
             'bufferMs': 0,
             'lossPct': 0.0,
             'level': 0.0,
-            'output': '扬声器',
+            'output': '扬声器 (Realtek Audio)',
             'toVirtual': false,
           },
         ],
-        'pending': ['mac#system'],
+        'pending': <String>[],
         'sources': [
-          {'id': 'mic|15|-', 'name': '内置麦克风', 'kind': 'microphone', 'isDefault': true},
-          {'id': 'mic|26|AA:BB:CC:DD:EE:FF', 'name': '蓝牙耳麦', 'kind': 'microphone', 'isDefault': false},
+          {
+            'id': 'mic|preview-array',
+            'name': '麦克风阵列 (Realtek Audio)',
+            'kind': 'microphone',
+            'isDefault': true,
+          },
+          {
+            'id': 'mic|preview-usb',
+            'name': 'USB 麦克风',
+            'kind': 'microphone',
+            'isDefault': false,
+          },
         ],
         'outputs': [
-          {'id': 'out|2|-', 'name': '扬声器', 'isDefault': true},
-          {'id': 'out|7|-', 'name': '蓝牙音频', 'isDefault': false},
-          {'id': 'out|4|-', 'name': 'USB 音频', 'isDefault': false},
+          {
+            'id': 'wasapi:preview-output',
+            'name': '扬声器 (Realtek Audio)',
+            'isDefault': true,
+          },
+          {
+            'id': 'wasapi:preview-cable',
+            'name': 'CABLE Input (VB-Audio Virtual Cable)',
+            'isDefault': false,
+          },
         ],
-        'selectedMic': 'mic|15|-',
+        'selectedMic': 'mic|preview-array',
         'selectedOutput': null,
+        'virtualMic': {
+          'enabled': false,
+          'state': 'missing',
+          'device': null,
+          'provider': 'VB-CABLE',
+          'link': 'https://vb-audio.com/Cable/',
+        },
         'prefs': {'restore': true, 'background': true},
         'notice': null,
       };

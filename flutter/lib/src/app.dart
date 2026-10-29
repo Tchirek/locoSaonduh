@@ -13,6 +13,9 @@ import 'ui/send_view.dart';
 import 'ui/settings_view.dart';
 
 // 秋の夜や 三つの戸を 巡り行く
+const String _initialTabName =
+    String.fromEnvironment('LOCO_TAB', defaultValue: 'receive');
+
 class LocoApp extends StatefulWidget {
   const LocoApp({super.key, required this.bridge});
 
@@ -32,7 +35,11 @@ class _ToastData {
 class _LocoAppState extends State<LocoApp> with WidgetsBindingObserver {
   Snapshot? _snapshot;
   String? _fatal;
-  LocoTab _tab = LocoTab.receive;
+  LocoTab _tab = switch (_initialTabName) {
+    'send' => LocoTab.send,
+    'settings' => LocoTab.settings,
+    _ => LocoTab.receive,
+  };
   List<Kind> _busy = const [];
   bool _scanning = false;
   bool _refreshing = false;
@@ -301,12 +308,14 @@ class _LocoAppState extends State<LocoApp> with WidgetsBindingObserver {
     );
     return compact
         ? Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               Expanded(child: main),
               nav,
             ],
           )
         : Row(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               nav,
               Expanded(child: main),
