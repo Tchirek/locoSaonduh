@@ -77,7 +77,9 @@ jobs:
 
       - name: Test engine
         working-directory: flutter/android
-        run: ./gradlew :app:testDebugUnitTest
+        run: |
+          chmod +x gradlew
+          ./gradlew :app:testDebugUnitTest
 
       - name: Build debug APK
         working-directory: flutter
