@@ -107,11 +107,12 @@ class LocoList extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colors = LocoColors.of(context);
-    return DecoratedBox(
-      decoration: BoxDecoration(
-        border: Border(top: BorderSide(color: colors.line)),
-      ),
-      child: Column(mainAxisSize: MainAxisSize.min, children: children),
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Container(height: 1, color: colors.line),
+        ...children,
+      ],
     );
   }
 }
@@ -590,7 +591,7 @@ class _SelectBoxState extends State<SelectBox> {
         onTap: enabled ? _open : null,
         child: Container(
           height: widget.compact ? 30 : 32,
-          padding: const EdgeInsets.only(left: 10, right: 30),
+          padding: const EdgeInsets.only(left: 10, right: 9),
           decoration: BoxDecoration(
             color: widget.compact ? colors.bg : colors.surface,
             borderRadius: BorderRadius.circular(LocoBox.radius),
@@ -598,29 +599,29 @@ class _SelectBoxState extends State<SelectBox> {
               color: _hover && enabled ? colors.ink : colors.lineStrong,
             ),
           ),
-          child: Stack(
-            alignment: Alignment.centerLeft,
+          child: Row(
             children: [
-              Text(
-                text,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                softWrap: false,
-                style: LocoText.body(
-                  colors,
-                  size: widget.compact ? 12 : 15,
-                ).copyWith(
-                  color: enabled ? colors.ink : colors.ink.withValues(alpha: 0.45),
+              Expanded(
+                child: Text(
+                  text,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  softWrap: false,
+                  style: LocoText.body(
+                    colors,
+                    size: widget.compact ? 12 : 15,
+                  ).copyWith(
+                    color:
+                        enabled ? colors.ink : colors.ink.withValues(alpha: 0.45),
+                  ),
                 ),
               ),
-              Positioned(
-                right: -21,
-                child: LucideIcon(
-                  LocoIcon.chevronDown,
-                  size: widget.compact ? 14 : 15,
-                  strokeWidth: 1.7,
-                  color: colors.muted,
-                ),
+              const SizedBox(width: 6),
+              LucideIcon(
+                LocoIcon.chevronDown,
+                size: widget.compact ? 14 : 15,
+                strokeWidth: 1.7,
+                color: colors.muted,
               ),
             ],
           ),

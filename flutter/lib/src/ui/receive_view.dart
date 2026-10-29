@@ -69,7 +69,18 @@ class _ReceiveViewState extends State<ReceiveView> {
   bool _probing = false;
 
   @override
+  void initState() {
+    super.initState();
+    _probeController.addListener(_onTyping);
+  }
+
+  void _onTyping() {
+    if (mounted) setState(() {});
+  }
+
+  @override
   void dispose() {
+    _probeController.removeListener(_onTyping);
     _probeController.dispose();
     super.dispose();
   }
@@ -251,16 +262,11 @@ class _ReceiveViewState extends State<ReceiveView> {
               children: [
                 for (final entry in entries)
                   LocoRow(
-                    wrap: MediaQuery.sizeOf(context).width < 480,
                     padding: const EdgeInsets.symmetric(vertical: 10),
                     children: [
                       DeviceIcon(platform: entry.platform),
                       const SizedBox(width: 12),
-                      if (MediaQuery.sizeOf(context).width < 480) ...[
-                        Expanded(child: _title(colors, entry.alias)),
-                      ] else ...[
-                        Expanded(child: _title(colors, entry.alias)),
-                      ],
+                      Expanded(child: _title(colors, entry.alias)),
                       _lanes(entry),
                     ],
                   ),
