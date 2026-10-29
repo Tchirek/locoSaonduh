@@ -25,6 +25,7 @@ class EngineService : Service() {
     private var powerLock: PowerManager.WakeLock? = null
     private var wifiLock: WifiManager.WifiLock? = null
     private var multicastLock: WifiManager.MulticastLock? = null
+    private var streamLocksHeld = false
     private val main = Handler(Looper.getMainLooper())
     private var foregroundTypes = 0
     private var micTypeRequested = false
@@ -35,7 +36,7 @@ class EngineService : Service() {
         super.onCreate()
         instance = this
         createChannel()
-        acquireLocks()
+        acquireMulticastLock()
         Engine.beforeCapture = { kind ->
             ensureForeground(
                 withMic = kind == SourceKind.MICROPHONE || micTypeRequested,
@@ -217,6 +218,7 @@ class EngineService : Service() {
                 try {
                     val manager = getSystemService(NotificationManager::class.java)
                     manager.notify(NOTIFICATION_ID, buildNotification())
+                    updateStreamLocks(isBusy())
                 } catch (_: Exception) {
                 }
                 main.postDelayed(this, 1_000)
@@ -226,39 +228,62 @@ class EngineService : Service() {
         main.postDelayed(runnable, 1_000)
     }
 
-    private fun acquireLocks() {
-        val power = getSystemService(Context.POWER_SERVICE) as PowerManager
-        powerLock = power.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "loco:stream").apply {
-            setReferenceCounted(false)
-            acquire()
+    private fun isBusy(): Boolean {
+        val json = Engine.snapshot ?: return false
+        return try {
+            val parsed = JSONObject(json)
+            (parsed.optJSONArray("listening")?.length() ?: 0) > 0 ||
+                (parsed.optJSONArray("broadcasts")?.length() ?: 0) > 0
+        } catch (_: Exception) {
+            false
         }
+    }
+
+    // 唄の間 灯を消しては また点す
+    private fun updateStreamLocks(busy: Boolean) {
+        if (busy == streamLocksHeld) return
+        if (busy) {
+            val power = getSystemService(Context.POWER_SERVICE) as PowerManager
+            powerLock = power.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "loco:stream").apply {
+                setReferenceCounted(false)
+                acquire()
+            }
+            val wifi = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+            @Suppress("DEPRECATION")
+            wifiLock = wifi.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "loco:wifi").apply {
+                setReferenceCounted(false)
+                acquire()
+            }
+            streamLocksHeld = true
+        } else {
+            try {
+                powerLock?.release()
+            } catch (_: Exception) {
+            }
+            try {
+                wifiLock?.release()
+            } catch (_: Exception) {
+            }
+            powerLock = null
+            wifiLock = null
+            streamLocksHeld = false
+        }
+    }
+
+    private fun acquireMulticastLock() {
         val wifi = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
         multicastLock = wifi.createMulticastLock("loco:discovery").apply {
-            setReferenceCounted(false)
-            acquire()
-        }
-        @Suppress("DEPRECATION")
-        wifiLock = wifi.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "loco:wifi").apply {
             setReferenceCounted(false)
             acquire()
         }
     }
 
     private fun releaseLocks() {
-        try {
-            powerLock?.release()
-        } catch (_: Exception) {
-        }
-        try {
-            wifiLock?.release()
-        } catch (_: Exception) {
-        }
+        updateStreamLocks(false)
         try {
             multicastLock?.release()
         } catch (_: Exception) {
         }
-        powerLock = null
-        wifiLock = null
         multicastLock = null
     }
 

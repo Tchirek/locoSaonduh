@@ -75,38 +75,43 @@ internal class Coordinator(
         nextScan = now0
         nextReconcile = now0
         while (running) {
-            drainInbox()
-            while (true) {
-                val command = commands.poll() ?: break
-                if (!handleCommand(command)) return
-            }
-            val now = System.nanoTime()
-            if (now >= nextAnnounce) {
-                announce()
-                nextAnnounce = now + ANNOUNCE_EVERY
-            }
-            if (now >= nextFeedback) {
-                sendFeedback()
-                nextFeedback = now + FEEDBACK_EVERY
-            }
-            if (now >= nextNetworkRefresh) {
-                local = localNetwork()
-                nextNetworkRefresh = now + 5 * SECOND
-            }
-            if (now >= nextScan) {
-                scanNetwork()
-            }
-            if (now >= nextReconcile) {
-                reconcileReceiver(now)
-                nextReconcile = now + SECOND
-            }
-            expirePending(now)
-            prunePeers(now)
-            reapStaleListeners(now)
-            checkHealth()
-            if (now >= nextSnapshot) {
-                if (needsSnapshot()) publish(force = false)
-                nextSnapshot = now + SNAPSHOT_EVERY
+            try {
+                drainInbox()
+                while (true) {
+                    val command = commands.poll() ?: break
+                    if (!handleCommand(command)) return
+                }
+                val now = System.nanoTime()
+                if (now >= nextAnnounce) {
+                    announce()
+                    nextAnnounce = now + ANNOUNCE_EVERY
+                }
+                if (now >= nextFeedback) {
+                    sendFeedback()
+                    nextFeedback = now + FEEDBACK_EVERY
+                }
+                if (now >= nextNetworkRefresh) {
+                    local = localNetwork()
+                    nextNetworkRefresh = now + 5 * SECOND
+                }
+                if (now >= nextScan) {
+                    scanNetwork()
+                }
+                if (now >= nextReconcile) {
+                    reconcileReceiver(now)
+                    nextReconcile = now + SECOND
+                }
+                expirePending(now)
+                prunePeers(now)
+                reapStaleListeners(now)
+                checkHealth()
+                if (now >= nextSnapshot) {
+                    if (needsSnapshot()) publish(force = false)
+                    nextSnapshot = now + SNAPSHOT_EVERY
+                }
+            } catch (failure: Throwable) {
+                // 灯を守る 夜の嵐も 越え行かむ
+                setNotice("error", failure.message ?: "内部错误")
             }
             Thread.sleep(2)
         }
@@ -483,7 +488,10 @@ internal class Coordinator(
                 val from = packet.socketAddress as? InetSocketAddress ?: continue
                 val payload = buffer.copyOf(length)
                 if (isAudioDatagram(payload)) {
-                    deliverAudio(payload, from)
+                    try {
+                        deliverAudio(payload, from)
+                    } catch (_: Throwable) {
+                    }
                 } else if (length <= Wire.MAX_CONTROL) {
                     if (!controls.offer(ControlEnvelope(payload, from))) {
                         controls.poll()
@@ -992,8 +1000,10 @@ internal class Coordinator(
                 mix.fill(0f)
                 var voices = 0
                 for (stream in streams.values) {
-                    val sounding = synchronized(stream) {
-                        stream.render(now, mix)
+                    val sounding = try {
+                        synchronized(stream) { stream.render(now, mix) }
+                    } catch (_: Throwable) {
+                        false
                     }
                     if (sounding) voices += 1
                 }
