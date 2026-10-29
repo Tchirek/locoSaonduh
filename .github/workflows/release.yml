@@ -93,9 +93,12 @@ jobs:
             - **Windows x86_64**: NSIS installer (`.exe`)
             - **macOS Universal**: disk image (`.dmg`) for Intel and Apple Silicon
             - **Linux x86_64**: AppImage and Debian package (`.deb`)
+            - **Android**: signed APK (`.apk`) for phones and tablets
 
-            These builds are unsigned. Windows SmartScreen and macOS Gatekeeper
-            may ask you to confirm before opening them.
+            These desktop builds are unsigned. Windows SmartScreen and macOS
+            Gatekeeper may ask you to confirm before opening them. The Android
+            APK is signed with the release key, so later versions install over
+            it without uninstalling.
 
             System sound is captured without this app's own playback, so two
             devices can play each other at once: Windows 10 (2004+) and 11,
@@ -110,6 +113,12 @@ jobs:
 
             Audio is sent over UDP port 53410 and is not encrypted. Use this on
             a trusted local network.
+
+            On Android the app runs as a foreground service, so listening and
+            broadcasting continue with the screen off. System sound capture
+            uses MediaProjection (Android 10+) and asks for consent once per
+            broadcast session; it records other apps' media playback, not
+            system UI sounds.
           releaseDraft: false
           prerelease: false
           args: ${{ matrix.args }}

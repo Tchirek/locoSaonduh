@@ -5,7 +5,8 @@ import '../snapshot.dart';
 import '../theme.dart';
 import 'bits.dart';
 
-const String appVersion = '0.3.0';
+const String appVersion =
+    String.fromEnvironment('APP_VERSION', defaultValue: '0.3.0');
 
 // 名を書きて 戸札新たに 秋の宿
 class SettingsView extends StatefulWidget {
