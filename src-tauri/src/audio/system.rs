@@ -412,11 +412,20 @@ mod macos_impl {
 
 #[cfg(target_os = "linux")]
 mod linux_impl {
-    use anyhow::{Result, anyhow};
+    use std::io::Read;
+    use std::process::{Command, Stdio};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use std::thread::{self, JoinHandle};
+
+    use anyhow::{Context, Result, anyhow};
     use cpal::traits::HostTrait;
 
-    use crate::audio::device::{AudioSource, CaptureGuard, OpenCapture, open_device_capture};
+    use crate::audio::device::{
+        AudioSource, CaptureGuard, CaptureTaps, OpenCapture, open_device_capture_tapped,
+    };
     use crate::audio::pulse::{self, SYSTEM_SINK, pactl};
+    use crate::protocol::{CHANNELS, FRAME_SAMPLES, SAMPLE_RATE};
 
     /// 迷ひ子の 帯ほどきやる 夜寒かな
     pub fn cleanup_stale() {
@@ -450,6 +459,7 @@ mod linux_impl {
     }
 
     pub struct Takeover {
+        capture: Option<NativeMonitor>,
         stream: Option<cpal::Stream>,
         null_module: String,
         /// `None` when this machine only sends and must stay silent.
@@ -486,6 +496,7 @@ mod linux_impl {
                 None
             };
             let takeover = Self {
+                capture: None,
                 stream: None,
                 null_module,
                 loopback_module,
@@ -511,6 +522,7 @@ mod linux_impl {
     impl Drop for Takeover {
         fn drop(&mut self) {
             drop(self.stream.take());
+            drop(self.capture.take());
             let _ = pactl(&["set-default-sink", &self.original]);
             pulse::move_inputs(SYSTEM_SINK, &self.original);
             if let Some(index) = &self.loopback_module {
@@ -520,22 +532,142 @@ mod linux_impl {
         }
     }
 
-    pub fn open(source: &AudioSource, local_playback: bool) -> Result<OpenCapture> {
-        let mut takeover = Takeover::start(local_playback)?;
+    /// 底を抜き 綱を太くて 汲み上げむ
+    pub struct NativeMonitor {
+        child: std::process::Child,
+        reader: Option<JoinHandle<()>>,
+        stop: Arc<AtomicBool>,
+    }
+
+    impl Drop for NativeMonitor {
+        fn drop(&mut self) {
+            self.stop.store(true, Ordering::Release);
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+            if let Some(reader) = self.reader.take() {
+                let _ = reader.join();
+            }
+        }
+    }
+
+    /// Capture a PipeWire node through `pw-record`.
+    ///
+    /// cpal's PulseAudio client drops this monitor's stream for seconds at a
+    /// time; a native recorder sees the same source without a single hole, so
+    /// the system mix is taken straight off PipeWire and the cpal path is only
+    /// used when `pw-record` is not installed.
+    fn open_native(
+        target: &str,
+        taps: CaptureTaps,
+    ) -> Result<(NativeMonitor, rtrb::Consumer<f32>)> {
+        let (mut producer, feed) = crate::audio::device::ring(SAMPLE_RATE, CHANNELS);
+        let rate = SAMPLE_RATE.to_string();
+        let channels = CHANNELS.to_string();
+        let latency = FRAME_SAMPLES.to_string();
+        let mut child = Command::new("pw-record")
+            .args([
+                "--target",
+                target,
+                "--raw",
+                "--format",
+                "f32",
+                "--rate",
+                &rate,
+                "--channels",
+                &channels,
+                "--latency",
+                &latency,
+                "-",
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .context("could not start pw-record")?;
+        let mut stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| anyhow!("pw-record returned no pipe"))?;
+        let stop = Arc::new(AtomicBool::new(false));
+        let worker_stop = Arc::clone(&stop);
+        let error_taps = taps.clone();
+        let frame_bytes = CHANNELS * size_of::<f32>();
+        let reader = thread::Builder::new()
+            .name("loco-pw-capture".to_owned())
+            .spawn(move || {
+                crate::audio::priority::promote();
+                let mut bytes = vec![0u8; 16_384];
+                let mut carry: Vec<u8> = Vec::with_capacity(frame_bytes);
+                while !worker_stop.load(Ordering::Acquire) {
+                    let read = match stdout.read(&mut bytes) {
+                        Ok(0) => break,
+                        Ok(read) => read,
+                        Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                        Err(error) => {
+                            error_taps.fail(format!("pw-record read failed: {error}"));
+                            break;
+                        }
+                    };
+                    carry.extend_from_slice(&bytes[..read]);
+                    let usable = carry.len() - carry.len() % frame_bytes;
+                    for frame in carry[..usable].chunks_exact(frame_bytes) {
+                        for sample in frame.chunks_exact(4) {
+                            let value =
+                                f32::from_le_bytes([sample[0], sample[1], sample[2], sample[3]]);
+                            let _ = producer.push(value);
+                        }
+                    }
+                    carry.drain(..usable);
+                }
+                if !worker_stop.load(Ordering::Acquire) {
+                    error_taps.fail("pw-record stopped delivering audio");
+                }
+            })
+            .context("could not start the PipeWire reader")?;
+        Ok((
+            NativeMonitor {
+                child,
+                reader: Some(reader),
+                stop,
+            },
+            feed,
+        ))
+    }
+
+    fn open_cpal(target: &str, taps: CaptureTaps) -> Result<(cpal::Stream, rtrb::Consumer<f32>)> {
         let host = cpal::default_host();
-        let id = cpal::DeviceId::new(cpal::HostId::PulseAudio, format!("{SYSTEM_SINK}.monitor"));
+        let id = cpal::DeviceId::new(cpal::HostId::PulseAudio, target);
         let device = host
             .device_by_id(&id)
             .ok_or_else(|| anyhow!("the takeover monitor is missing"))?;
-        let capture = open_device_capture(&device, false)?;
-        Ok(OpenCapture::from_device(
-            source,
-            capture,
-            move |stream| {
+        let capture = open_device_capture_tapped(&device, false, taps)?;
+        Ok((capture.stream, capture.feed))
+    }
+
+    pub fn open(source: &AudioSource, local_playback: bool) -> Result<OpenCapture> {
+        let mut takeover = Takeover::start(local_playback)?;
+        let taps = CaptureTaps::default();
+        let target = format!("{SYSTEM_SINK}.monitor");
+        let feed = match open_native(&target, taps.clone()) {
+            Ok((capture, feed)) => {
+                takeover.capture = Some(capture);
+                feed
+            }
+            Err(error) => {
+                log::warn!("native PipeWire capture unavailable ({error:#}); using cpal");
+                let (stream, feed) = open_cpal(&target, taps.clone())?;
                 takeover.stream = Some(stream);
-                CaptureGuard::Takeover(takeover)
-            },
-            true,
-        ))
+                feed
+            }
+        };
+        Ok(OpenCapture {
+            guard: CaptureGuard::Takeover(takeover),
+            feed,
+            source: source.clone(),
+            sample_rate: SAMPLE_RATE,
+            channels: CHANNELS,
+            taps,
+            excludes_self: true,
+        })
     }
 }

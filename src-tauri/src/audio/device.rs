@@ -252,6 +252,14 @@ fn capture_frames() -> u32 {
 }
 
 pub fn open_device_capture(device: &cpal::Device, loopback: bool) -> Result<DeviceCapture> {
+    open_device_capture_tapped(device, loopback, CaptureTaps::default())
+}
+
+pub fn open_device_capture_tapped(
+    device: &cpal::Device,
+    loopback: bool,
+    taps: CaptureTaps,
+) -> Result<DeviceCapture> {
     let config = if loopback {
         device
             .default_output_config()
@@ -265,7 +273,6 @@ pub fn open_device_capture(device: &cpal::Device, loopback: bool) -> Result<Devi
     let sample_rate = config.sample_rate();
     let channels = config.channels() as usize;
     let (producer, feed) = ring(sample_rate, channels);
-    let taps = CaptureTaps::default();
 
     let format = config.sample_format();
     let config: cpal::StreamConfig = config.into();
