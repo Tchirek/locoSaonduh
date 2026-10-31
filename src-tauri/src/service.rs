@@ -39,6 +39,10 @@ const PEER_TTL: Duration = Duration::from_secs(25);
 const SCAN_EVERY: Duration = Duration::from_secs(12);
 const RECONCILE_EVERY: Duration = Duration::from_secs(1);
 const AUTO_RETRY: Duration = Duration::from_secs(3);
+/// Longer than any healthy graph pause; past this the capture is presumed dead.
+const STARVE_LIMIT: Duration = Duration::from_secs(6);
+/// Do not keep rebuilding a capture that cannot be revived.
+const STARVE_BACKOFF: Duration = Duration::from_secs(20);
 const PENDING_TTL: Duration = Duration::from_millis(2_500);
 const LISTENER_TTL: Duration = Duration::from_secs(30);
 const VIRTUAL_SETTLE: Duration = Duration::from_secs(12);
@@ -190,6 +194,7 @@ impl Service {
             next_network_refresh: Instant::now() + Duration::from_secs(5),
             next_scan: Instant::now(),
             next_reconcile: Instant::now(),
+            next_starve_retry: Instant::now(),
             command_rx,
         };
         coordinator.reload_devices();
@@ -407,6 +412,7 @@ struct Coordinator {
     next_network_refresh: Instant,
     next_scan: Instant,
     next_reconcile: Instant,
+    next_starve_retry: Instant,
     command_rx: Receiver<Command>,
 }
 
@@ -450,6 +456,9 @@ struct SenderControl {
     stop: AtomicBool,
     bitrate_kbps: AtomicU32,
     loss_x100: AtomicU32,
+    /// Set when the capture has delivered nothing for longer than any audio
+    /// graph should stutter, so the coordinator can rebuild the stream.
+    starved: AtomicBool,
 }
 
 impl SenderControl {
@@ -458,6 +467,7 @@ impl SenderControl {
             stop: AtomicBool::new(false),
             bitrate_kbps: AtomicU32::new(128),
             loss_x100: AtomicU32::new(0),
+            starved: AtomicBool::new(false),
         }
     }
 }
@@ -1502,7 +1512,11 @@ impl Coordinator {
             .iter_mut()
             .find(|listener| listener.address.ip() == from.ip())
         {
+            // A receiver that reconnects comes back on a fresh source port.
+            // Keeping the old one leaves the stream talking to a socket nobody
+            // is reading, and the listener's own chatter keeps it alive.
             listener.alias = subscribe.alias;
+            listener.address = SocketAddr::new(from.ip(), from.port());
             listener.last_seen = Instant::now();
         }
         drop(listeners);
@@ -1749,6 +1763,27 @@ impl Coordinator {
     }
 
     fn check_health(&mut self) {
+        let starved = self
+            .broadcasts
+            .iter()
+            .filter(|runtime| runtime.control.starved.load(Ordering::Relaxed))
+            .map(|runtime| runtime.kind)
+            .collect::<Vec<_>>();
+        for kind in starved {
+            let now = Instant::now();
+            if now < self.next_starve_retry {
+                continue;
+            }
+            self.next_starve_retry = now + STARVE_BACKOFF;
+            log::warn!(
+                "{} capture delivered nothing for {STARVE_LIMIT:?}; rebuilding it",
+                kind.label()
+            );
+            self.stop_stream(kind, StopCause::Restart);
+            if let Err(error) = self.start_stream(kind) {
+                self.set_notice("error", format!("{error:#}"));
+            }
+        }
         let failed = self
             .broadcasts
             .iter()
@@ -2169,6 +2204,7 @@ fn sender_loop(job: SenderJob) {
     let mut seq = 0u32;
     let mut timestamp = 0u32;
     let mut feed = feed;
+    let mut alive_since = Instant::now();
 
     while !control.stop.load(Ordering::Acquire) {
         while let Ok(sample) = feed.pop() {
@@ -2178,9 +2214,15 @@ fn sender_loop(job: SenderJob) {
             }
         }
         if input.is_empty() {
+            control.starved.store(
+                alive_since.elapsed() > STARVE_LIMIT,
+                Ordering::Relaxed,
+            );
             thread::sleep(Duration::from_millis(2));
             continue;
         }
+        alive_since = Instant::now();
+        control.starved.store(false, Ordering::Relaxed);
         adapter.push(&input, &mut converted);
         input.clear();
         let mut consumed = 0usize;
