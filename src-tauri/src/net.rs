@@ -19,6 +19,10 @@ pub struct NetworkInterface {
 }
 
 const MAX_SCAN_HOSTS: usize = 1_024;
+/// One interface may not spend the whole sweep. A room never needs more than a
+/// /24, and a bridge to a dead device would otherwise starve every other
+/// interface of the shared budget.
+const MAX_SCAN_PER_INTERFACE: usize = 254;
 const EXPEDITED_FORWARDING: u32 = 46 << 2;
 
 pub fn ipv4_interfaces() -> Vec<NetworkInterface> {
@@ -80,6 +84,12 @@ pub fn bind_discovery_socket(port: u16) -> Result<Arc<UdpSocket>> {
     socket
         .set_read_timeout(Some(Duration::from_millis(100)))
         .context("could not bound discovery socket reads")?;
+    // A probe aimed at an interface with no carrier can block inside the kernel.
+    // Audio shares this socket, so a send that cannot finish quickly is dropped
+    // instead of freezing the stream behind it.
+    socket
+        .set_write_timeout(Some(Duration::from_millis(20)))
+        .context("could not bound discovery socket writes")?;
     let socket: UdpSocket = socket.into();
 
     // Join on every live interface, not just the route-table default. A VPN
@@ -192,7 +202,14 @@ fn interface_sender(ip: Ipv4Addr) -> std::io::Result<UdpSocket> {
 /// original probe can still send its answer to the right port.
 pub fn scan_discovery(socket: &UdpSocket, payload: &[u8], port: u16) -> usize {
     let mut sent = 0usize;
-    for target in scan_candidates(&ipv4_interfaces()) {
+    // Container bridges and VPN devices answer nowhere; sweeping them costs the
+    // shared socket seconds of blocked sends for nothing.
+    let interfaces = ipv4_interfaces()
+        .into_iter()
+        .filter(|interface| !virtual_looking(&interface.name))
+        .filter(|interface| !matches!(interface.ip.octets(), [198, 18..=19, ..]))
+        .collect::<Vec<_>>();
+    for target in scan_candidates(&interfaces) {
         if socket.send_to(payload, (target, port)).is_ok() {
             sent += 1;
         }
@@ -209,6 +226,7 @@ fn scan_candidates(interfaces: &[NetworkInterface]) -> Vec<Ipv4Addr> {
         if mask.count_ones() >= 31 {
             continue;
         }
+        let mut per_interface = 0usize;
         let network = u32::from(interface.ip) & mask;
         let broadcast = u32::from(interface.broadcast);
         let host_count = broadcast.saturating_sub(network).saturating_sub(1) as usize;
@@ -234,6 +252,10 @@ fn scan_candidates(interfaces: &[NetworkInterface]) -> Vec<Ipv4Addr> {
                 if targets.len() >= MAX_SCAN_HOSTS {
                     return targets;
                 }
+            }
+            per_interface += 1;
+            if per_interface >= MAX_SCAN_PER_INTERFACE {
+                break;
             }
         }
     }
@@ -343,6 +365,18 @@ mod tests {
         if let Some(ip) = network.ip {
             assert!(!ip.starts_with("127."));
         }
+    }
+
+    #[test]
+    fn container_and_vpn_devices_are_not_room_networks() {
+        // docker0 is a /16 that is usually down; sweeping it used to block the
+        // shared socket long enough to drop seconds of audio.
+        assert!(virtual_looking("docker0"));
+        assert!(virtual_looking("br-3f9a1c"));
+        assert!(virtual_looking("FlClash"));
+        assert!(virtual_looking("tailscale0"));
+        assert!(!virtual_looking("eno1"));
+        assert!(!virtual_looking("wlp3s0"));
     }
 
     #[test]
