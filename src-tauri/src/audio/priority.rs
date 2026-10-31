@@ -2,7 +2,9 @@
 
 pub fn promote() {
     if let Err(error) = imp::promote() {
-        log::debug!("audio thread keeps its normal priority: {error}");
+        log::warn!(
+            "audio thread keeps its normal priority, latency will suffer under load: {error}"
+        );
     }
 }
 
