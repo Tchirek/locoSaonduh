@@ -240,6 +240,17 @@ pub fn open_capture(source: &AudioSource, local_playback: bool) -> Result<OpenCa
     ))
 }
 
+/// Frames per capture fragment. One codec frame keeps the send cadence even;
+/// `LOCOSAONDUH_CAPTURE_FRAG` overrides it for hosts whose audio server stalls
+/// on very small fragments.
+fn capture_frames() -> u32 {
+    std::env::var("LOCOSAONDUH_CAPTURE_FRAG")
+        .ok()
+        .and_then(|value| value.trim().parse::<u32>().ok())
+        .filter(|frames| (32..=48_000).contains(frames))
+        .unwrap_or(FRAME_SAMPLES as u32)
+}
+
 pub fn open_device_capture(device: &cpal::Device, loopback: bool) -> Result<DeviceCapture> {
     let config = if loopback {
         device
@@ -258,9 +269,10 @@ pub fn open_device_capture(device: &cpal::Device, loopback: bool) -> Result<Devi
 
     let format = config.sample_format();
     let config: cpal::StreamConfig = config.into();
+    let frames = capture_frames();
     let mut producer = Some(producer);
     let mut stream = None;
-    for size in [Some(FRAME_SAMPLES as u32), None] {
+    for size in [Some(frames), None] {
         match build_input_for_format(
             device,
             format,
@@ -276,7 +288,7 @@ pub fn open_device_capture(device: &cpal::Device, loopback: bool) -> Result<Devi
             Err(error) if size.is_some() => {
                 // 溜めざるを まずは器の 縁に問ふ
                 log::warn!(
-                    "a {FRAME_SAMPLES}-frame capture chunk was refused ({error:#}); \
+                    "a {frames}-frame capture chunk was refused ({error:#}); \
                      retrying with the host's own buffer size"
                 );
             }
