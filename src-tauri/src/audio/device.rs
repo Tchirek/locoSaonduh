@@ -218,9 +218,9 @@ pub fn ring(sample_rate: u32, channels: usize) -> (rtrb::Producer<f32>, rtrb::Co
 }
 
 /// Open a capture stream and return a realtime-safe feed for the encoder.
-pub fn open_capture(source: &AudioSource) -> Result<OpenCapture> {
+pub fn open_capture(source: &AudioSource, local_playback: bool) -> Result<OpenCapture> {
     if source.id == SYSTEM_SOURCE_ID {
-        return system::open(source);
+        return system::open(source, local_playback);
     }
     let device_id = source
         .id
@@ -389,7 +389,7 @@ mod tests {
     #[test]
     #[ignore = "requires a real audio endpoint; run manually"]
     fn system_capture_delivers_samples() {
-        let mut capture = open_capture(&system_source()).expect("capture should open");
+        let mut capture = open_capture(&system_source(), true).expect("capture should open");
         std::thread::sleep(std::time::Duration::from_millis(400));
         let mut samples = 0usize;
         while capture.feed.pop().is_ok() {

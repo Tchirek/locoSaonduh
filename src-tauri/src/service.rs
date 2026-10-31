@@ -92,6 +92,7 @@ enum Command {
     SetPrefs {
         restore: Option<bool>,
         background: Option<bool>,
+        local_playback: Option<bool>,
         reply: Reply,
     },
     SetVirtualMic {
@@ -266,14 +267,20 @@ impl Service {
         )
     }
 
-    pub fn set_prefs(&self, restore: Option<bool>, background: Option<bool>) -> Result<(), String> {
+    pub fn set_prefs(
+        &self,
+        restore: Option<bool>,
+        background: Option<bool>,
+        local_playback: Option<bool>,
+    ) -> Result<(), String> {
         self.call(
             |reply| Command::SetPrefs {
                 restore,
                 background,
+                local_playback,
                 reply,
             },
-            Duration::from_secs(2),
+            Duration::from_secs(3),
         )
     }
 
@@ -710,6 +717,7 @@ impl Coordinator {
             Command::SetPrefs {
                 restore,
                 background,
+                local_playback,
                 reply,
             } => {
                 if let Some(restore) = restore {
@@ -718,7 +726,18 @@ impl Coordinator {
                 if let Some(background) = background {
                     self.settings.background = background;
                 }
+                let routed = local_playback.filter(|local| *local != self.settings.local_playback);
+                if let Some(local) = routed {
+                    self.settings.local_playback = local;
+                }
                 self.save();
+                if routed.is_some() && self.stream(SourceKind::System).is_some() {
+                    // The takeover has to be rebuilt: it owns the loopback.
+                    self.stop_stream(SourceKind::System, StopCause::Restart);
+                    if let Err(error) = self.start_stream(SourceKind::System) {
+                        self.set_notice("error", format!("{error:#}"));
+                    }
+                }
                 self.publish();
                 let _ = reply.send(Ok(()));
             }
@@ -809,7 +828,7 @@ impl Coordinator {
             channels,
             taps,
             excludes_self,
-        } = open_capture(&source)?;
+        } = open_capture(&source, self.settings.local_playback)?;
         if let Some(message) = taps.error.lock().unwrap().take() {
             return Err(anyhow!(message));
         }
@@ -2016,6 +2035,7 @@ impl Coordinator {
             prefs: PrefsView {
                 restore: self.settings.restore,
                 background: self.settings.background,
+                local_playback: self.settings.local_playback,
             },
             notice,
         }

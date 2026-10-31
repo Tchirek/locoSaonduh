@@ -52,6 +52,7 @@ pub struct VirtualMicView {
 pub struct PrefsView {
     pub restore: bool,
     pub background: bool,
+    pub local_playback: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]

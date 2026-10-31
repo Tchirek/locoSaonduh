@@ -60,7 +60,7 @@ mod windows_impl {
     }
 
     /// 古き戸は 己が声をも 通しけり
-    pub fn open(source: &AudioSource) -> Result<OpenCapture> {
+    pub fn open(source: &AudioSource, _local_playback: bool) -> Result<OpenCapture> {
         open_excluding(source).or_else(|error| {
             log::warn!("process loopback unavailable, capturing the endpoint: {error:#}");
             open_endpoint(source)
@@ -245,7 +245,7 @@ mod macos_impl {
         }
     }
 
-    pub fn open(source: &AudioSource) -> Result<OpenCapture> {
+    pub fn open(source: &AudioSource, _local_playback: bool) -> Result<OpenCapture> {
         let mut tap = ExcludingTap::create()?;
         let host = cpal::default_host();
         let id = cpal::DeviceId::new(cpal::HostId::CoreAudio, &tap.uid);
@@ -452,12 +452,13 @@ mod linux_impl {
     pub struct Takeover {
         stream: Option<cpal::Stream>,
         null_module: String,
-        loopback_module: String,
+        /// `None` when this machine only sends and must stay silent.
+        loopback_module: Option<String>,
         original: String,
     }
 
     impl Takeover {
-        fn start() -> Result<Self> {
+        fn start(local_playback: bool) -> Result<Self> {
             let original = pulse::default_sink()?;
             let null_module = pactl(&[
                 "load-module",
@@ -465,20 +466,24 @@ mod linux_impl {
                 &format!("sink_name={SYSTEM_SINK}"),
                 "sink_properties=device.description=locoSaonduh",
             ])?;
-            let loopback_module = match pactl(&[
-                "load-module",
-                "module-loopback",
-                &format!("source={SYSTEM_SINK}.monitor"),
-                &format!("sink={original}"),
-                "latency_msec=20",
-                "source_dont_move=true",
-                "sink_dont_move=true",
-            ]) {
-                Ok(index) => index,
-                Err(error) => {
-                    pulse::unload(&null_module);
-                    return Err(error);
+            let loopback_module = if local_playback {
+                match pactl(&[
+                    "load-module",
+                    "module-loopback",
+                    &format!("source={SYSTEM_SINK}.monitor"),
+                    &format!("sink={original}"),
+                    "latency_msec=20",
+                    "source_dont_move=true",
+                    "sink_dont_move=true",
+                ]) {
+                    Ok(index) => Some(index),
+                    Err(error) => {
+                        pulse::unload(&null_module);
+                        return Err(error);
+                    }
                 }
+            } else {
+                None
             };
             let takeover = Self {
                 stream: None,
@@ -488,7 +493,7 @@ mod linux_impl {
             };
             pactl(&["set-default-sink", SYSTEM_SINK])?;
             for input in pulse::sink_inputs()? {
-                let owned = input.owner_module.as_deref() == Some(&takeover.loopback_module);
+                let owned = input.owner_module.as_deref() == takeover.loopback_module.as_deref();
                 if input.ours || owned || input.sink != takeover.original {
                     continue;
                 }
@@ -508,13 +513,15 @@ mod linux_impl {
             drop(self.stream.take());
             let _ = pactl(&["set-default-sink", &self.original]);
             pulse::move_inputs(SYSTEM_SINK, &self.original);
-            pulse::unload(&self.loopback_module);
+            if let Some(index) = &self.loopback_module {
+                pulse::unload(index);
+            }
             pulse::unload(&self.null_module);
         }
     }
 
-    pub fn open(source: &AudioSource) -> Result<OpenCapture> {
-        let mut takeover = Takeover::start()?;
+    pub fn open(source: &AudioSource, local_playback: bool) -> Result<OpenCapture> {
+        let mut takeover = Takeover::start(local_playback)?;
         let host = cpal::default_host();
         let id = cpal::DeviceId::new(cpal::HostId::PulseAudio, format!("{SYSTEM_SINK}.monitor"));
         let device = host

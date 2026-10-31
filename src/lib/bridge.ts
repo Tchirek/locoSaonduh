@@ -85,6 +85,7 @@ export async function setOutput(outputId: string | null): Promise<void> {
 export async function setPrefs(prefs: {
   restore?: boolean;
   background?: boolean;
+  localPlayback?: boolean;
 }): Promise<void> {
   if (IS_TAURI) return invoke("set_prefs", prefs);
   return mock.setPrefs(prefs);
@@ -237,7 +238,7 @@ const baseSnapshot: Snapshot = {
     provider: "VB-CABLE",
     link: "https://vb-audio.com/Cable/",
   },
-  prefs: { restore: true, background: true },
+  prefs: { restore: true, background: true, localPlayback: true },
   notice: null,
 };
 
@@ -351,7 +352,11 @@ const mock = {
     emit();
   },
 
-  async setPrefs(prefs: { restore?: boolean; background?: boolean }): Promise<void> {
+  async setPrefs(prefs: {
+    restore?: boolean;
+    background?: boolean;
+    localPlayback?: boolean;
+  }): Promise<void> {
     await pause(120);
     current.prefs = { ...current.prefs, ...prefs };
     emit();

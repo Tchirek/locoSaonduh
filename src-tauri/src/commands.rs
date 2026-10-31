@@ -91,9 +91,10 @@ pub async fn set_prefs(
     state: State<'_, AppState>,
     restore: Option<bool>,
     background: Option<bool>,
+    local_playback: Option<bool>,
 ) -> Result<(), String> {
     blocking(state.service()?, move |service| {
-        service.set_prefs(restore, background)
+        service.set_prefs(restore, background, local_playback)
     })
     .await
 }

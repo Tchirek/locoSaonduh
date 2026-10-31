@@ -97,6 +97,7 @@ export interface VirtualMic {
 export interface Prefs {
   restore: boolean;
   background: boolean;
+  localPlayback: boolean;
 }
 
 export interface Notice {

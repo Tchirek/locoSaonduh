@@ -180,6 +180,19 @@
           />
         </span>
       </div>
+      <div class="setting">
+        <span class="setting-label">
+          系统声音本机外放
+          <small>关闭后本机静音，只向房间里的其他设备发送</small>
+        </span>
+        <span class="setting-switch">
+          <Switch
+            label="系统声音本机外放"
+            checked={snapshot.prefs.localPlayback}
+            onchange={(localPlayback) => onSetPrefs({ localPlayback })}
+          />
+        </span>
+      </div>
     </div>
   </section>
 

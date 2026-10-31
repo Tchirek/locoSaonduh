@@ -24,6 +24,10 @@ pub struct Settings {
     pub restore: bool,
     #[serde(default = "enabled")]
     pub background: bool,
+    /// Keep the room's own speakers fed while the system mix is broadcast.
+    /// Turning it off leaves this machine silent and only sends.
+    #[serde(default = "enabled")]
+    pub local_playback: bool,
     #[serde(default)]
     pub virtual_mic: bool,
 }
@@ -75,6 +79,7 @@ impl Settings {
             listen: Vec::new(),
             restore: true,
             background: true,
+            local_playback: true,
             virtual_mic: false,
         };
         if let Err(error) = settings.save(dir) {
