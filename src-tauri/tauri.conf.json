@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "locoSaonduh",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "identifier": "com.tchirek.locosaonduh",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -34,8 +34,12 @@
     "category": "Music",
     "linux": {
       "deb": {
-        "depends": ["libayatana-appindicator3-1"],
-        "recommends": ["pulseaudio-utils"]
+        "depends": [
+          "libayatana-appindicator3-1"
+        ],
+        "recommends": [
+          "pulseaudio-utils"
+        ]
       }
     },
     "shortDescription": "Listen to any device on your LAN",
