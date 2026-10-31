@@ -250,7 +250,31 @@ pub struct LocalNetwork {
     pub interface: Option<String>,
 }
 
+/// The address the kernel would use for the default route, found without
+/// sending a packet: connecting a UDP socket only performs the route lookup.
+fn default_route_ip() -> Option<Ipv4Addr> {
+    let socket = std::net::UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).ok()?;
+    socket.connect((Ipv4Addr::new(1, 1, 1, 1), 9)).ok()?;
+    match socket.local_addr().ok()?.ip() {
+        std::net::IpAddr::V4(ip) if !ip.is_loopback() && !ip.is_unspecified() => Some(ip),
+        _ => None,
+    }
+}
+
+fn virtual_looking(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    [
+        "docker", "br-", "veth", "virbr", "podman", "cni", "flannel", "tun", "tap", "wg", "zt",
+        "tailscale", "vethernet", "virtual", "wsl", "vmnet", "vboxnet",
+    ]
+    .iter()
+    .any(|prefix| lower.starts_with(prefix) || lower.contains(prefix))
+}
+
 pub fn local_network() -> LocalNetwork {
+    // A container bridge or VPN device can be up with a private address and no
+    // route to the room, so the address that owns the default route wins.
+    let routed = default_route_ip();
     let mut candidates = ipv4_interfaces()
         .into_iter()
         .map(|interface| (interface.ip, interface.name))
@@ -263,10 +287,7 @@ pub fn local_network() -> LocalNetwork {
             [192, 168, ..] => true,
             _ => false,
         };
-        let virtual_looking = name.to_lowercase().contains("vethernet")
-            || name.to_lowercase().contains("virtual")
-            || name.to_lowercase().contains("wsl");
-        (!private, virtual_looking, name.clone())
+        (Some(*ip) != routed, !private, virtual_looking(name), name.clone())
     });
     match candidates.into_iter().next() {
         Some((ip, interface)) => LocalNetwork {
