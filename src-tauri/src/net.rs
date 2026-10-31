@@ -250,36 +250,25 @@ pub struct LocalNetwork {
     pub interface: Option<String>,
 }
 
-/// The address the kernel would use for the default route, found without
-/// sending a packet: connecting a UDP socket only performs the route lookup.
-fn default_route_ip() -> Option<Ipv4Addr> {
-    let socket = std::net::UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).ok()?;
-    socket.connect((Ipv4Addr::new(1, 1, 1, 1), 9)).ok()?;
-    match socket.local_addr().ok()?.ip() {
-        std::net::IpAddr::V4(ip) if !ip.is_loopback() && !ip.is_unspecified() => Some(ip),
-        _ => None,
-    }
-}
-
+/// Container bridges, VPN tunnels and Clash-style fake-ip devices all hand out
+/// addresses that look local but cannot reach the room.
 fn virtual_looking(name: &str) -> bool {
     let lower = name.to_lowercase();
     [
         "docker", "br-", "veth", "virbr", "podman", "cni", "flannel", "tun", "tap", "wg", "zt",
-        "tailscale", "vethernet", "virtual", "wsl", "vmnet", "vboxnet",
+        "tailscale", "clash", "mihomo", "sing-box", "singbox", "vethernet", "virtual", "wsl",
+        "vmnet", "vboxnet",
     ]
     .iter()
     .any(|prefix| lower.starts_with(prefix) || lower.contains(prefix))
 }
 
 pub fn local_network() -> LocalNetwork {
-    // A container bridge or VPN device can be up with a private address and no
-    // route to the room, so the address that owns the default route wins.
-    let routed = default_route_ip();
     let mut candidates = ipv4_interfaces()
         .into_iter()
-        .map(|interface| (interface.ip, interface.name))
+        .map(|interface| (interface.ip, interface.name, interface.netmask))
         .collect::<Vec<_>>();
-    candidates.sort_by_key(|(ip, name)| {
+    candidates.sort_by_key(|(ip, name, netmask)| {
         let octets = ip.octets();
         let private = match octets {
             [10, ..] => true,
@@ -287,10 +276,16 @@ pub fn local_network() -> LocalNetwork {
             [192, 168, ..] => true,
             _ => false,
         };
-        (Some(*ip) != routed, !private, virtual_looking(name), name.clone())
+        // 198.18.0.0/15 is the benchmarking block proxies give their fake-ip
+        // device, and a /29 or narrower subnet is a point-to-point tunnel, not
+        // a room full of speakers.
+        let fake_ip = matches!(octets, [198, 18..=19, ..]);
+        let narrow = u32::from(*netmask).leading_ones() > 28;
+        let tunnelish = virtual_looking(name) || fake_ip || narrow;
+        (tunnelish, !private, name.clone())
     });
     match candidates.into_iter().next() {
-        Some((ip, interface)) => LocalNetwork {
+        Some((ip, interface, _)) => LocalNetwork {
             ip: Some(ip.to_string()),
             interface: Some(interface),
         },
