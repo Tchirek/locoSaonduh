@@ -10,6 +10,7 @@ use rtrb::RingBuffer;
 use serde::Serialize;
 
 use super::system;
+use crate::protocol::FRAME_SAMPLES;
 
 pub const SYSTEM_SOURCE_ID: &str = "system|*";
 
@@ -257,20 +258,32 @@ pub fn open_device_capture(device: &cpal::Device, loopback: bool) -> Result<Devi
 
     let format = config.sample_format();
     let config: cpal::StreamConfig = config.into();
-    let stream = match format {
-        SampleFormat::F64 => build_input::<f64>(device, config, producer, taps.clone()),
-        SampleFormat::F32 => build_input::<f32>(device, config, producer, taps.clone()),
-        SampleFormat::I32 => build_input::<i32>(device, config, producer, taps.clone()),
-        SampleFormat::I24 => build_input::<cpal::I24>(device, config, producer, taps.clone()),
-        SampleFormat::I16 => build_input::<i16>(device, config, producer, taps.clone()),
-        SampleFormat::I8 => build_input::<i8>(device, config, producer, taps.clone()),
-        SampleFormat::U32 => build_input::<u32>(device, config, producer, taps.clone()),
-        SampleFormat::U24 => build_input::<cpal::U24>(device, config, producer, taps.clone()),
-        SampleFormat::U16 => build_input::<u16>(device, config, producer, taps.clone()),
-        SampleFormat::U8 => build_input::<u8>(device, config, producer, taps.clone()),
-        other => return Err(anyhow!("unsupported sample format {other}")),
+    let mut producer = Some(producer);
+    let mut stream = None;
+    for size in [Some(FRAME_SAMPLES as u32), None] {
+        match build_input_for_format(
+            device,
+            format,
+            config.clone(),
+            producer.take().expect("each attempt consumes the producer"),
+            taps.clone(),
+            size,
+        ) {
+            Ok(built) => {
+                stream = Some(built);
+                break;
+            }
+            Err(error) if size.is_some() => {
+                // 溜めざるを まずは器の 縁に問ふ
+                log::warn!(
+                    "a {FRAME_SAMPLES}-frame capture chunk was refused ({error:#}); \
+                     retrying with the host's own buffer size"
+                );
+            }
+            Err(error) => return Err(error.context("could not start capture")),
+        }
     }
-    .context("could not start capture")?;
+    let stream = stream.expect("the host default buffer is always attempted");
 
     stream
         .play()
@@ -282,6 +295,36 @@ pub fn open_device_capture(device: &cpal::Device, loopback: bool) -> Result<Devi
         channels,
         taps,
     })
+}
+
+// 汲む水を 溜めず運ぶ 竿の先
+fn build_input_for_format(
+    device: &cpal::Device,
+    format: SampleFormat,
+    mut config: cpal::StreamConfig,
+    producer: rtrb::Producer<f32>,
+    taps: CaptureTaps,
+    frames: Option<u32>,
+) -> Result<cpal::Stream> {
+    if let Some(frames) = frames {
+        // An unset size lets the server fill in its own default capture
+        // fragment — two full seconds on pipewire-pulse — and the sender
+        // sits on that much audio before the first packet leaves.
+        config.buffer_size = cpal::BufferSize::Fixed(frames);
+    }
+    match format {
+        SampleFormat::F64 => build_input::<f64>(device, config, producer, taps),
+        SampleFormat::F32 => build_input::<f32>(device, config, producer, taps),
+        SampleFormat::I32 => build_input::<i32>(device, config, producer, taps),
+        SampleFormat::I24 => build_input::<cpal::I24>(device, config, producer, taps),
+        SampleFormat::I16 => build_input::<i16>(device, config, producer, taps),
+        SampleFormat::I8 => build_input::<i8>(device, config, producer, taps),
+        SampleFormat::U32 => build_input::<u32>(device, config, producer, taps),
+        SampleFormat::U24 => build_input::<cpal::U24>(device, config, producer, taps),
+        SampleFormat::U16 => build_input::<u16>(device, config, producer, taps),
+        SampleFormat::U8 => build_input::<u8>(device, config, producer, taps),
+        other => Err(anyhow!("unsupported sample format {other}")),
+    }
 }
 
 fn build_input<T>(
