@@ -568,6 +568,10 @@ mod linux_impl {
             .args([
                 "--target",
                 target,
+                // `<sink>.monitor` is a PulseAudio name; the node itself is the
+                // sink, and this flag makes the recorder tap its monitor.
+                "--properties",
+                "stream.capture.sink=true",
                 "--raw",
                 "--format",
                 "f32",
@@ -591,6 +595,7 @@ mod linux_impl {
         let stop = Arc::new(AtomicBool::new(false));
         let worker_stop = Arc::clone(&stop);
         let error_taps = taps.clone();
+        let level_taps = taps.clone();
         let frame_bytes = CHANNELS * size_of::<f32>();
         let reader = thread::Builder::new()
             .name("loco-pw-capture".to_owned())
@@ -598,6 +603,7 @@ mod linux_impl {
                 crate::audio::priority::promote();
                 let mut bytes = vec![0u8; 16_384];
                 let mut carry: Vec<u8> = Vec::with_capacity(frame_bytes);
+                let mut pcm: Vec<f32> = Vec::with_capacity(4_096);
                 while !worker_stop.load(Ordering::Acquire) {
                     let read = match stdout.read(&mut bytes) {
                         Ok(0) => break,
@@ -610,13 +616,15 @@ mod linux_impl {
                     };
                     carry.extend_from_slice(&bytes[..read]);
                     let usable = carry.len() - carry.len() % frame_bytes;
+                    pcm.clear();
                     for frame in carry[..usable].chunks_exact(frame_bytes) {
                         for sample in frame.chunks_exact(4) {
-                            let value =
-                                f32::from_le_bytes([sample[0], sample[1], sample[2], sample[3]]);
-                            let _ = producer.push(value);
+                            pcm.push(f32::from_le_bytes([
+                                sample[0], sample[1], sample[2], sample[3],
+                            ]));
                         }
                     }
+                    level_taps.push(&mut producer, pcm.iter().copied());
                     carry.drain(..usable);
                 }
                 if !worker_stop.load(Ordering::Acquire) {
@@ -647,14 +655,14 @@ mod linux_impl {
     pub fn open(source: &AudioSource, local_playback: bool) -> Result<OpenCapture> {
         let mut takeover = Takeover::start(local_playback)?;
         let taps = CaptureTaps::default();
-        let target = format!("{SYSTEM_SINK}.monitor");
-        let feed = match open_native(&target, taps.clone()) {
+        let feed = match open_native(SYSTEM_SINK, taps.clone()) {
             Ok((capture, feed)) => {
                 takeover.capture = Some(capture);
                 feed
             }
             Err(error) => {
                 log::warn!("native PipeWire capture unavailable ({error:#}); using cpal");
+                let target = format!("{SYSTEM_SINK}.monitor");
                 let (stream, feed) = open_cpal(&target, taps.clone())?;
                 takeover.stream = Some(stream);
                 feed
