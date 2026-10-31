@@ -68,36 +68,35 @@ impl PlaybackSink {
         let (feed, consumer) = RingBuffer::<[f32; 2]>::new(capacity);
         let taps = OutputTaps::default();
 
-        let stream = match config.sample_format() {
-            SampleFormat::F64 => {
-                build_output::<f64>(&device, config.into(), consumer, taps.clone())
+        let format = config.sample_format();
+        let frames = SAMPLE_RATE / 100;
+        let config: cpal::StreamConfig = config.into();
+        let mut consumer = Some(consumer);
+        let mut stream = None;
+        for size in [Some(frames), None] {
+            match build_output_for_format(
+                &device,
+                format,
+                config.clone(),
+                consumer.take().expect("each attempt consumes the consumer"),
+                taps.clone(),
+                size,
+            ) {
+                Ok(built) => {
+                    stream = Some(built);
+                    break;
+                }
+                Err(error) if size.is_some() => {
+                    // 浅き江の 深き溜めを 端に置く
+                    log::warn!(
+                        "a {frames}-frame output chunk was refused ({error:#}); \
+                         retrying with the host's own buffer size"
+                    );
+                }
+                Err(error) => return Err(error.context("could not start playback")),
             }
-            SampleFormat::F32 => {
-                build_output::<f32>(&device, config.into(), consumer, taps.clone())
-            }
-            SampleFormat::I32 => {
-                build_output::<i32>(&device, config.into(), consumer, taps.clone())
-            }
-            SampleFormat::I24 => {
-                build_output::<cpal::I24>(&device, config.into(), consumer, taps.clone())
-            }
-            SampleFormat::I16 => {
-                build_output::<i16>(&device, config.into(), consumer, taps.clone())
-            }
-            SampleFormat::I8 => build_output::<i8>(&device, config.into(), consumer, taps.clone()),
-            SampleFormat::U32 => {
-                build_output::<u32>(&device, config.into(), consumer, taps.clone())
-            }
-            SampleFormat::U24 => {
-                build_output::<cpal::U24>(&device, config.into(), consumer, taps.clone())
-            }
-            SampleFormat::U16 => {
-                build_output::<u16>(&device, config.into(), consumer, taps.clone())
-            }
-            SampleFormat::U8 => build_output::<u8>(&device, config.into(), consumer, taps.clone()),
-            other => return Err(anyhow!("unsupported sample format {other}")),
         }
-        .context("could not start playback")?;
+        let stream = stream.expect("the host default buffer is always attempted");
 
         stream.play().context("could not start the output stream")?;
         Ok(Self {
@@ -106,6 +105,35 @@ impl PlaybackSink {
             info,
             taps,
         })
+    }
+}
+
+// 還る音 浅き瀬にこそ 速やかに
+fn build_output_for_format(
+    device: &cpal::Device,
+    format: SampleFormat,
+    mut config: cpal::StreamConfig,
+    consumer: rtrb::Consumer<[f32; 2]>,
+    taps: OutputTaps,
+    frames: Option<u32>,
+) -> Result<cpal::Stream> {
+    if let Some(frames) = frames {
+        // An unset size lets the server prebuffer its own default target
+        // (two full seconds on pipewire-pulse) before anything is heard.
+        config.buffer_size = cpal::BufferSize::Fixed(frames);
+    }
+    match format {
+        SampleFormat::F64 => build_output::<f64>(device, config, consumer, taps),
+        SampleFormat::F32 => build_output::<f32>(device, config, consumer, taps),
+        SampleFormat::I32 => build_output::<i32>(device, config, consumer, taps),
+        SampleFormat::I24 => build_output::<cpal::I24>(device, config, consumer, taps),
+        SampleFormat::I16 => build_output::<i16>(device, config, consumer, taps),
+        SampleFormat::I8 => build_output::<i8>(device, config, consumer, taps),
+        SampleFormat::U32 => build_output::<u32>(device, config, consumer, taps),
+        SampleFormat::U24 => build_output::<cpal::U24>(device, config, consumer, taps),
+        SampleFormat::U16 => build_output::<u16>(device, config, consumer, taps),
+        SampleFormat::U8 => build_output::<u8>(device, config, consumer, taps),
+        other => Err(anyhow!("unsupported sample format {other}")),
     }
 }
 
