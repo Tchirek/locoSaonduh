@@ -64,37 +64,48 @@ impl PlaybackSink {
             channels,
         };
 
+        #[allow(unused_mut)]
+        let mut stream_config: cpal::StreamConfig = config.into();
+        // PipeWire/PulseAudio leaves the period to the server when the size is
+        // unset, and that default arrives as a burst (8192 frames here) while
+        // the engine mixes in 10 ms frames; pin the period to one frame.
+        #[cfg(target_os = "linux")]
+        {
+            stream_config.buffer_size =
+                cpal::BufferSize::Fixed(crate::protocol::FRAME_SAMPLES as u32);
+        }
+
         let capacity = (sample_rate as usize * 2).clamp(16_384, 524_288);
         let (feed, consumer) = RingBuffer::<[f32; 2]>::new(capacity);
         let taps = OutputTaps::default();
 
         let stream = match config.sample_format() {
             SampleFormat::F64 => {
-                build_output::<f64>(&device, config.into(), consumer, taps.clone())
+                build_output::<f64>(&device, stream_config, consumer, taps.clone())
             }
             SampleFormat::F32 => {
-                build_output::<f32>(&device, config.into(), consumer, taps.clone())
+                build_output::<f32>(&device, stream_config, consumer, taps.clone())
             }
             SampleFormat::I32 => {
-                build_output::<i32>(&device, config.into(), consumer, taps.clone())
+                build_output::<i32>(&device, stream_config, consumer, taps.clone())
             }
             SampleFormat::I24 => {
-                build_output::<cpal::I24>(&device, config.into(), consumer, taps.clone())
+                build_output::<cpal::I24>(&device, stream_config, consumer, taps.clone())
             }
             SampleFormat::I16 => {
-                build_output::<i16>(&device, config.into(), consumer, taps.clone())
+                build_output::<i16>(&device, stream_config, consumer, taps.clone())
             }
-            SampleFormat::I8 => build_output::<i8>(&device, config.into(), consumer, taps.clone()),
+            SampleFormat::I8 => build_output::<i8>(&device, stream_config, consumer, taps.clone()),
             SampleFormat::U32 => {
-                build_output::<u32>(&device, config.into(), consumer, taps.clone())
+                build_output::<u32>(&device, stream_config, consumer, taps.clone())
             }
             SampleFormat::U24 => {
-                build_output::<cpal::U24>(&device, config.into(), consumer, taps.clone())
+                build_output::<cpal::U24>(&device, stream_config, consumer, taps.clone())
             }
             SampleFormat::U16 => {
-                build_output::<u16>(&device, config.into(), consumer, taps.clone())
+                build_output::<u16>(&device, stream_config, consumer, taps.clone())
             }
-            SampleFormat::U8 => build_output::<u8>(&device, config.into(), consumer, taps.clone()),
+            SampleFormat::U8 => build_output::<u8>(&device, stream_config, consumer, taps.clone()),
             other => return Err(anyhow!("unsupported sample format {other}")),
         }
         .context("could not start playback")?;

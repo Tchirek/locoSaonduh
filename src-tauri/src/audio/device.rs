@@ -256,7 +256,12 @@ pub fn open_device_capture(device: &cpal::Device, loopback: bool) -> Result<Devi
     let taps = CaptureTaps::default();
 
     let format = config.sample_format();
-    let config: cpal::StreamConfig = config.into();
+    #[allow(unused_mut)]
+    let mut config: cpal::StreamConfig = config.into();
+    #[cfg(target_os = "linux")]
+    {
+        config.buffer_size = cpal::BufferSize::Fixed(crate::protocol::FRAME_SAMPLES as u32);
+    }
     let stream = match format {
         SampleFormat::F64 => build_input::<f64>(device, config, producer, taps.clone()),
         SampleFormat::F32 => build_input::<f32>(device, config, producer, taps.clone()),
