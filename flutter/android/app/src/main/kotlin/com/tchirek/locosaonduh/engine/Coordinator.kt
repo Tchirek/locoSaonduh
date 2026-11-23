@@ -91,8 +91,11 @@ internal class Coordinator(
                     nextFeedback = now + FEEDBACK_EVERY
                 }
                 if (now >= nextNetworkRefresh) {
-                    local = localNetwork()
+                    val refreshed = localNetwork()
+                    val changed = refreshed.ip != local.ip || refreshed.interfaceName != local.interfaceName
+                    local = refreshed
                     nextNetworkRefresh = now + 5 * SECOND
+                    if (changed) probeNetwork()
                 }
                 if (now >= nextScan) {
                     scanNetwork()
@@ -731,7 +734,7 @@ internal class Coordinator(
             val peer = peers[intent.peerId]
             val announced = peer?.stream(intent.kind.label)
             var dropped = false
-            if (active != null && (announced == null || announced.session != active.session)) {
+            if (active != null && receiverStreamIsStale(active, announced, now)) {
                 receiver?.streams?.remove(key)
                 dropped = true
                 intent.nextAttempt = if (announced != null) now else now + AUTO_RETRY
@@ -746,6 +749,18 @@ internal class Coordinator(
                 autoSubscribe(key, InetSocketAddress(peer.address, peer.port), announced.session, now)
             }
         }
+    }
+
+    // A sender keeps its session number across a Wi-Fi reconnect, so only a
+    // packet timeout can reveal that the old peer address is useless and the
+    // subscription has to be renewed.
+    private fun receiverStreamIsStale(
+        stream: ReceiverStream,
+        announced: BroadcastAnnounce?,
+        now: Long,
+    ): Boolean {
+        if (now - stream.lastPacket >= STREAM_SILENCE) return true
+        return announced == null || announced.session != stream.session
     }
 
     private fun autoSubscribe(key: String, address: InetSocketAddress, session: Int, now: Long) {
@@ -1289,6 +1304,9 @@ internal class Coordinator(
         private const val AUTO_RETRY = 3 * SECOND
         private const val PENDING_TTL = 2_500_000_000L
         private const val LISTENER_TTL = 30 * SECOND
+        // Frames flow continuously while a sender has listeners, silent input
+        // included; two seconds without one means the pipe is gone.
+        private const val STREAM_SILENCE = 2 * SECOND
         private const val MIN_MARGIN = Wire.FRAME_SAMPLES / 2
         private const val MAX_MARGIN = Wire.FRAME_SAMPLES * 5
         private const val MARGIN_CALM = 30 * SECOND

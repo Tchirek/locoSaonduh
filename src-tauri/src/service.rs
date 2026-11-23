@@ -41,6 +41,10 @@ const RECONCILE_EVERY: Duration = Duration::from_secs(1);
 const AUTO_RETRY: Duration = Duration::from_secs(3);
 const PENDING_TTL: Duration = Duration::from_millis(2_500);
 const LISTENER_TTL: Duration = Duration::from_secs(30);
+// Audio frames arrive continuously while a sender has listeners, silent input
+// included. Two seconds without a single datagram means the pipe is gone, even
+// when the sender still advertises the same session (a Wi-Fi reconnect).
+const STREAM_SILENCE: Duration = Duration::from_secs(2);
 const VIRTUAL_SETTLE: Duration = Duration::from_secs(12);
 const MIN_MARGIN: usize = FRAME_SAMPLES / 2;
 const MAX_MARGIN: usize = FRAME_SAMPLES * 5;
@@ -543,8 +547,15 @@ impl Coordinator {
                 self.next_feedback = now + FEEDBACK_EVERY;
             }
             if now >= self.next_network_refresh {
-                self.local = local_network();
+                let local = local_network();
+                let changed = local.ip != self.local.ip || local.interface != self.local.interface;
+                self.local = local;
                 self.next_network_refresh = now + Duration::from_secs(5);
+                if changed {
+                    // 網替はり 灯をともし直し 歌を待つ
+                    log::info!("local network changed to {:?}; probing again", self.local);
+                    self.probe_network();
+                }
                 self.settle_virtual(now);
             }
             if now >= self.next_scan {
@@ -1192,11 +1203,12 @@ impl Coordinator {
             else {
                 continue;
             };
-            let active_session = self.receiver.as_ref().and_then(|runtime| {
+            let active = self.receiver.as_ref().and_then(|runtime| {
                 runtime.streams.lock().ok().and_then(|streams| {
-                    streams
-                        .get(&key)
-                        .map(|stream| stream.lock().unwrap().session)
+                    streams.get(&key).map(|stream| {
+                        let stream = stream.lock().unwrap();
+                        (stream.session, stream.last_packet)
+                    })
                 })
             });
             let peer_state = self.peers.get(&peer_id).map(|peer| {
@@ -1207,30 +1219,31 @@ impl Coordinator {
             });
 
             let mut dropped_active = false;
-            if active_session.is_some()
-                && let Some((_, announced)) = peer_state.as_ref()
-                && (announced.is_none()
-                    || announced.is_some_and(|session| Some(session) != active_session))
+            if let Some((session, last_packet)) = active
+                && receiver_stream_is_stale(session, last_packet, peer_state, now)
             {
                 if let Some(runtime) = self.receiver.as_ref() {
                     runtime.streams.lock().unwrap().remove(&key);
                 }
                 dropped_active = true;
+                let announced = peer_state
+                    .as_ref()
+                    .is_some_and(|(_, announced)| announced.is_some());
                 if let Some(intent) = self.intents.get_mut(&key) {
-                    intent.next_attempt = if announced.is_some() {
+                    intent.next_attempt = if announced {
                         now
                     } else {
                         now + AUTO_RETRY
                     };
                 }
+                log::debug!("receiver stream {key} is stale; returning to standby");
             }
             if dropped_active {
-                log::debug!("receiver stream {key} is stale; returning to standby");
                 self.sync_virtual_route();
                 self.publish_soon();
             }
 
-            let active_now = active_session.is_some() && !dropped_active;
+            let active_now = active.is_some() && !dropped_active;
             let Some((address, Some(session))) = peer_state else {
                 continue;
             };
@@ -2022,6 +2035,23 @@ impl Coordinator {
     }
 }
 
+/// A receiver stream has died when its sender no longer advertises that
+/// session, or when the audio itself stops arriving. The second case is the one
+/// that survives a network outage: a sender keeps its session number across a
+/// Wi-Fi reconnect, so only the packet timeout reveals that the stream is dead
+/// and the subscription has to be renewed.
+fn receiver_stream_is_stale(
+    session: u32,
+    last_packet: Instant,
+    peer: Option<(SocketAddr, Option<u32>)>,
+    now: Instant,
+) -> bool {
+    if now.saturating_duration_since(last_packet) >= STREAM_SILENCE {
+        return true;
+    }
+    peer.is_some_and(|(_, announced)| announced != Some(session))
+}
+
 struct Intake {
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
@@ -2431,5 +2461,37 @@ mod tests {
             &[1],
             &[]
         )));
+    }
+
+    #[test]
+    fn a_silent_receiver_stream_is_revived_after_the_timeout() {
+        let now = Instant::now();
+        let peer = Some((SocketAddr::from(([192, 168, 10, 7], 53_410)), Some(7)));
+        assert!(!receiver_stream_is_stale(7, now, peer, now));
+        assert!(!receiver_stream_is_stale(
+            7,
+            now,
+            peer,
+            now + STREAM_SILENCE - Duration::from_millis(1)
+        ));
+        // The sender still announces the same session after a Wi-Fi reconnect,
+        // so silence is the only clue that the pipe has to be rebuilt.
+        assert!(receiver_stream_is_stale(
+            7,
+            now,
+            peer,
+            now + STREAM_SILENCE
+        ));
+    }
+
+    #[test]
+    fn a_changed_session_is_stale_even_with_fresh_audio() {
+        let now = Instant::now();
+        let restarted = Some((SocketAddr::from(([192, 168, 10, 7], 53_410)), Some(9)));
+        assert!(receiver_stream_is_stale(7, now, restarted, now));
+        let ended = Some((SocketAddr::from(([192, 168, 10, 7], 53_410)), None));
+        assert!(receiver_stream_is_stale(7, now, ended, now));
+        // A pruned peer is not proof of death; only real silence is.
+        assert!(!receiver_stream_is_stale(7, now, None, now));
     }
 }
